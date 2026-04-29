@@ -1,7 +1,7 @@
 # Builds a self-contained publish folder (and optional zip) for end users.
 # Requires .NET 8 SDK only on the machine that runs this script - not on players' PCs.
 param(
-    [string] $OutputDir = (Join-Path $PSScriptRoot "..\artifacts\R-Utility"),
+    [string] $OutputDir = (Join-Path $PSScriptRoot "..\artifacts\R-Util"),
     [switch] $Zip
 )
 
@@ -21,6 +21,6 @@ Write-Host "Distribute the entire folder (all files) - WPF may place native DLLs
 if ($Zip) {
     $zipPath = "$OutputDir.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-    Compress-Archive -Path (Join-Path $OutputDir "*") -DestinationPath $zipPath
+    Compress-Archive -Path $OutputDir -DestinationPath $zipPath
     Write-Host ('Zip: ' + $zipPath)
 }
