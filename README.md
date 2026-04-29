@@ -91,6 +91,6 @@ The multi-instance action may need **Run as administrator** on some systems, dep
 
 ## License
 
-Copyright © 2026 **Khu72**. All rights reserved. See **[LICENSE](./LICENSE)** for ownership, permitted use, and restrictions on distribution.
+Copyright © 2026 **Khu72**. All rights reserved. See **[LICENSE.md](./LICENSE.md)** for ownership, permitted use, and restrictions on distribution.
 
 **Before you use or share this software, read [TERMS.md](./TERMS.md)** (disclaimers, Roblox-related notices, and your responsibilities).
