@@ -1,0 +1,47 @@
+# Produces a self-contained Windows build: no .NET SDK or runtime needed on the player's PC.
+# Download the ZIP from the workflow run's "Artifacts", or attach it to a GitHub Release.
+name: Build portable (self-contained)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish (self-contained)
+        run: >
+          dotnet publish RobloxUtility/RobloxUtility.csproj
+          -c Release -r win-x64
+          -p:PublishSingleFile=true -p:SelfContained=true
+          -o "${{ github.workspace }}/publish"
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ github.workspace }}/publish/*" -DestinationPath "${{ github.workspace }}/RobloxUtility-win-x64-self-contained.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RobloxUtility-win-x64-self-contained
+          path: RobloxUtility-win-x64-self-contained.zip
+
+      - name: Attach to GitHub Release (when tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: RobloxUtility-win-x64-self-contained.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
