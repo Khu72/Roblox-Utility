@@ -19,6 +19,8 @@ public sealed class MultiInstanceService
         "Roblox",
     };
     private const uint ProcessDupHandle = 0x0040;
+    /// <summary>Win10+; often allowed when full <see cref="ProcessQueryInformation"/> is denied.</summary>
+    private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessVmRead = 0x0010;
     private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
@@ -79,31 +81,50 @@ public sealed class MultiInstanceService
         IntPtr hProcess = IntPtr.Zero;
         try
         {
-            hProcess = NativeMethods.OpenProcess(
-                ProcessDupHandle | ProcessQueryInformation | ProcessVmRead,
-                false,
-                process.Id);
+            // Prefer minimal rights: games/AV often block QUERY_INFORMATION + VM_READ while DUPLICATE still works.
+            hProcess = NativeMethods.OpenProcess(ProcessDupHandle, false, process.Id);
             if (hProcess == IntPtr.Zero)
             {
-                detail = $"OpenProcess failed (Win32={Marshal.GetLastWin32Error()}).";
+                hProcess = NativeMethods.OpenProcess(
+                    ProcessDupHandle | ProcessQueryLimitedInformation,
+                    false,
+                    process.Id);
+            }
+
+            if (hProcess == IntPtr.Zero)
+            {
+                hProcess = NativeMethods.OpenProcess(
+                    ProcessDupHandle | ProcessQueryInformation | ProcessVmRead,
+                    false,
+                    process.Id);
+            }
+
+            if (hProcess == IntPtr.Zero)
+            {
+                detail = $"OpenProcess failed (Win32={Marshal.GetLastWin32Error()}). Try running the utility as Administrator.";
                 return false;
             }
 
-            if (!QuerySystemHandleTable(out var tablePtr, out var tableSize) || tablePtr == IntPtr.Zero)
+            if (!QuerySystemHandleTable(NativeMethods.SystemExtendedHandleInformation, out var tablePtr, out _)
+                || tablePtr == IntPtr.Zero)
             {
-                detail = "NtQuerySystemInformation failed.";
+                detail = "NtQuerySystemInformation(SystemExtendedHandleInformation) failed.";
                 return false;
             }
 
             using (new LocalMemory(tablePtr))
             {
-                if (TryCloseUsingExtendedTable(hProcess, process.Id, tablePtr, out var closedEx))
+                TryCloseUsingExtendedTable(hProcess, process.Id, tablePtr, out var closedEx);
+                handlesClosed += closedEx;
+            }
+
+            if (handlesClosed == 0 && process.Id <= 0xFFFF
+                && QuerySystemHandleTable(NativeMethods.SystemHandleInformation, out var legacyPtr, out _)
+                && legacyPtr != IntPtr.Zero)
+            {
+                using (new LocalMemory(legacyPtr))
                 {
-                    handlesClosed += closedEx;
-                }
-                else
-                {
-                    handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, tablePtr);
+                    handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, legacyPtr);
                 }
             }
         }
@@ -117,7 +138,9 @@ public sealed class MultiInstanceService
 
         if (handlesClosed == 0)
         {
-            detail = "No matching handle found or access denied when duplicating/closing.";
+            detail = process.Id > 0xFFFF
+                ? "No matching handle found (or duplication blocked). Your Roblox PID is above 65535; only the extended handle table path applies on your system."
+                : "No matching handle found or access denied when duplicating/closing. If Roblox is running, try Run as administrator, allow the app in AV, or check for a different Roblox build (e.g. Microsoft Store).";
         }
         return handlesClosed > 0;
     }
@@ -130,7 +153,7 @@ public sealed class MultiInstanceService
             // SYSTEM_HANDLE_INFORMATION_EX:
             // ULONG_PTR NumberOfHandles; ULONG_PTR Reserved; SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Handles[]
             var count = Marshal.ReadIntPtr(tablePtr).ToInt64();
-            if (count <= 0 || count > int.MaxValue)
+            if (count <= 0 || count > 16_000_000)
             {
                 return false;
             }
@@ -164,7 +187,8 @@ public sealed class MultiInstanceService
                     continue;
                 }
 
-                if (!TryGetName(dup, out var name) || !name.Contains("ROBLOX_singletonEvent", StringComparison.OrdinalIgnoreCase))
+                if (!TryGetName(dup, out var name)
+                    || !name.Contains("singletonEvent", StringComparison.OrdinalIgnoreCase))
                 {
                     NativeMethods.CloseHandle(dup);
                     continue;
@@ -197,22 +221,35 @@ public sealed class MultiInstanceService
 
     private static int TryCloseUsingLegacyTable(IntPtr hProcess, int pid, IntPtr tablePtr)
     {
+        if (pid > 0xFFFF)
+        {
+            return 0;
+        }
+
         var handlesClosed = 0;
         var pBase = tablePtr;
-        var count = (int)Marshal.ReadInt32(pBase);
+        uint countU = unchecked((uint)Marshal.ReadInt32(pBase));
+        if (countU > 16_000_000)
+        {
+            return 0;
+        }
+
+        var count = (int)countU;
+
         pBase = IntPtr.Add(pBase, sizeof(uint));
-        int handleStructSize = Marshal.SizeOf<SystemHandle>();
+        int handleStructSize = Marshal.SizeOf<SystemHandleTableEntryInfo>();
+        ushort upid = (ushort)pid;
         for (int i = 0; i < count; i++)
         {
-            var h = Marshal.PtrToStructure<SystemHandle>(pBase);
+            var h = Marshal.PtrToStructure<SystemHandleTableEntryInfo>(pBase);
             pBase = IntPtr.Add(pBase, handleStructSize);
 
-            if ((int)h.ProcessId != pid)
+            if (h.UniqueProcessId != upid)
             {
                 continue;
             }
 
-            var handleValue = new IntPtr(h.Handle);
+            var handleValue = new IntPtr(h.HandleValue);
             if (!NativeMethods.DuplicateHandle(
                     hProcess,
                     handleValue,
@@ -225,7 +262,8 @@ public sealed class MultiInstanceService
                 continue;
             }
 
-            if (!TryGetName(dup, out var name) || !name.Contains("ROBLOX_singletonEvent", StringComparison.OrdinalIgnoreCase))
+            if (!TryGetName(dup, out var name)
+                || !name.Contains("singletonEvent", StringComparison.OrdinalIgnoreCase))
             {
                 NativeMethods.CloseHandle(dup);
                 continue;
@@ -289,7 +327,8 @@ public sealed class MultiInstanceService
         }
     }
 
-    private static bool QuerySystemHandleTable(out IntPtr table, out uint size)
+    /// <param name="informationClass"><see cref="NativeMethods.SystemExtendedHandleInformation"/> or <see cref="NativeMethods.SystemHandleInformation"/>.</param>
+    private static bool QuerySystemHandleTable(int informationClass, out IntPtr table, out uint size)
     {
         table = IntPtr.Zero;
         size = 0x10000;
@@ -297,20 +336,11 @@ public sealed class MultiInstanceService
         {
             var buf = Marshal.AllocHGlobal((int)size);
             int status = NativeMethods.NtQuerySystemInformation(
-                NativeMethods.SystemExtendedHandleInformation,
+                informationClass,
                 buf,
                 (uint)size,
                 out var retLen);
 
-            if (status != StatusSuccess && status != StatusInfoLengthMismatch)
-            {
-                // Fallback for older systems.
-                status = NativeMethods.NtQuerySystemInformation(
-                    NativeMethods.SystemHandleInformation,
-                    buf,
-                    (uint)size,
-                    out retLen);
-            }
             if (status == StatusInfoLengthMismatch)
             {
                 Marshal.FreeHGlobal(buf);

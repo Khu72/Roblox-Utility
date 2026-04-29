@@ -250,14 +250,19 @@ internal static class NativeMethods
     public static extern nint GetModuleHandle(string? lpModuleName);
 }
 
-/// <summary>Matches the layout used in reference singleton-closer C code (x64, pack 1).</summary>
+/// <summary>
+/// <see cref="SystemHandleInformation"/> (class 16) entries match ntexapi
+/// <c>SYSTEM_HANDLE_TABLE_ENTRY_INFO</c> (e.g. Process Hacker), not the older ULONG-ProcessId layout.
+/// <see cref="UniqueProcessId"/> is only 16 bits; legacy enumeration cannot match PIDs &gt; 65535.
+/// </summary>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-internal struct SystemHandle
+internal struct SystemHandleTableEntryInfo
 {
-    public uint ProcessId;
-    public byte ObjectTypeNumber;
-    public byte Flags;
-    public ushort Handle;
+    public ushort UniqueProcessId;
+    public ushort CreatorBackTraceIndex;
+    public byte ObjectTypeIndex;
+    public byte HandleAttributes;
+    public ushort HandleValue;
     public IntPtr Object;
     public uint GrantedAccess;
 }
