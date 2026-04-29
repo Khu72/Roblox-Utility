@@ -45,7 +45,7 @@
           </Grid.RowDefinitions>
           <TextBlock Grid.Row="0" Text="Multi-Instance" Style="{StaticResource H1}" />
           <TextBlock Grid.Row="1" Margin="0,10,0,0" Style="{StaticResource Body}"
-                     Text="Roblox keeps a named kernel object (often shown as \BaseNamedObjects\ROBLOX_singletonEvent) so only one client is allowed. This app finds that handle in running RobloxPlayerBeta.exe and closes it so you can open more than one. Run as Administrator if you get &quot;Access denied&quot;." />
+                     Text="Roblox keeps a session-scoped named object (e.g. \Sessions\&lt;n&gt;\BaseNamedObjects\ROBLOX_singletonEvent) so only one client is allowed. This app finds that handle in running Roblox and closes it so you can open more than one. Run as Administrator if you get &quot;Access denied&quot; or handle-table errors." />
           <Button Grid.Row="2" x:Name="EnableMultiInstanceButton" Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" MinWidth="260"
                   Click="EnableMultiInstance_Click" Content="Enable multi-instance (all Roblox)" />
           <Border Grid.Row="3" Margin="0,16,0,0" VerticalAlignment="Stretch" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14,12">

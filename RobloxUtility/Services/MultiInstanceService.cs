@@ -79,6 +79,10 @@ public sealed class MultiInstanceService
         }
 
         IntPtr hProcess = IntPtr.Zero;
+        var extOk = false;
+        var extNt = 0;
+        var legOk = false;
+        var legNt = 0;
         try
         {
             // Prefer minimal rights: games/AV often block QUERY_INFORMATION + VM_READ while DUPLICATE still works.
@@ -105,26 +109,34 @@ public sealed class MultiInstanceService
                 return false;
             }
 
-            if (!QuerySystemHandleTable(NativeMethods.SystemExtendedHandleInformation, out var tablePtr, out _)
-                || tablePtr == IntPtr.Zero)
+            // Class 64 (extended) is richer but is blocked on some PCs/policies; class 16 (basic) still works for typical PIDs ≤ 65535.
+            extOk = QuerySystemHandleTable(
+                NativeMethods.SystemExtendedHandleInformation,
+                out var extTable,
+                out _,
+                out extNt);
+            if (extOk && extTable != IntPtr.Zero)
             {
-                detail = "NtQuerySystemInformation(SystemExtendedHandleInformation) failed.";
-                return false;
-            }
-
-            using (new LocalMemory(tablePtr))
-            {
-                TryCloseUsingExtendedTable(hProcess, process.Id, tablePtr, out var closedEx);
-                handlesClosed += closedEx;
-            }
-
-            if (handlesClosed == 0 && process.Id <= 0xFFFF
-                && QuerySystemHandleTable(NativeMethods.SystemHandleInformation, out var legacyPtr, out _)
-                && legacyPtr != IntPtr.Zero)
-            {
-                using (new LocalMemory(legacyPtr))
+                using (new LocalMemory(extTable))
                 {
-                    handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, legacyPtr);
+                    TryCloseUsingExtendedTable(hProcess, process.Id, extTable, out var closedEx);
+                    handlesClosed += closedEx;
+                }
+            }
+
+            if (handlesClosed == 0 && process.Id <= 0xFFFF)
+            {
+                legOk = QuerySystemHandleTable(
+                    NativeMethods.SystemHandleInformation,
+                    out var legacyPtr,
+                    out _,
+                    out legNt);
+                if (legOk && legacyPtr != IntPtr.Zero)
+                {
+                    using (new LocalMemory(legacyPtr))
+                    {
+                        handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, legacyPtr);
+                    }
                 }
             }
         }
@@ -138,10 +150,28 @@ public sealed class MultiInstanceService
 
         if (handlesClosed == 0)
         {
-            detail = process.Id > 0xFFFF
-                ? "No matching handle found (or duplication blocked). Your Roblox PID is above 65535; only the extended handle table path applies on your system."
-                : "No matching handle found or access denied when duplicating/closing. If Roblox is running, try Run as administrator, allow the app in AV, or check for a different Roblox build (e.g. Microsoft Store).";
+            if (!extOk && process.Id <= 0xFFFF && !legOk)
+            {
+                detail =
+                    $"Could not read system handle tables (extended NtStatus=0x{extNt:X8}; basic=0x{legNt:X8}). Run as Administrator; some devices block extended info (class 64) but allow the basic list (class 16).";
+            }
+            else if (!extOk && process.Id > 0xFFFF)
+            {
+                detail =
+                    $"Extended handle information failed (0x{extNt:X8}) and this Roblox PID is above 65535, so the basic handle list cannot target it.";
+            }
+            else if (process.Id > 0xFFFF)
+            {
+                detail =
+                    "No matching handle found (or duplication blocked). Roblox's PID is above 65535; only the extended handle table can enumerate it on this PC.";
+            }
+            else
+            {
+                detail =
+                    "No matching singletonEvent handle was closed (duplicate/close may be blocked). Ensure Roblox is running, run this app as Administrator, and check AV; Microsoft Store / some builds differ.";
+            }
         }
+
         return handlesClosed > 0;
     }
 
@@ -328,10 +358,12 @@ public sealed class MultiInstanceService
     }
 
     /// <param name="informationClass"><see cref="NativeMethods.SystemExtendedHandleInformation"/> or <see cref="NativeMethods.SystemHandleInformation"/>.</param>
-    private static bool QuerySystemHandleTable(int informationClass, out IntPtr table, out uint size)
+    /// <param name="ntStatusOnFailure">Last non-success NTSTATUS when this returns false (0 if buffer grew too large).</param>
+    private static bool QuerySystemHandleTable(int informationClass, out IntPtr table, out uint size, out int ntStatusOnFailure)
     {
         table = IntPtr.Zero;
         size = 0x10000;
+        ntStatusOnFailure = 0;
         while (size < 0x2000000)
         {
             var buf = Marshal.AllocHGlobal((int)size);
@@ -350,6 +382,7 @@ public sealed class MultiInstanceService
 
             if (status != StatusSuccess)
             {
+                ntStatusOnFailure = status;
                 Marshal.FreeHGlobal(buf);
                 return false;
             }
@@ -359,6 +392,7 @@ public sealed class MultiInstanceService
             return true;
         }
 
+        ntStatusOnFailure = StatusInfoLengthMismatch;
         return false;
     }
 
