@@ -152,8 +152,11 @@ public sealed class MultiInstanceService
         {
             if (!extOk && process.Id <= 0xFFFF && !legOk)
             {
-                detail =
-                    $"Could not read system handle tables (extended NtStatus=0x{extNt:X8}; basic=0x{legNt:X8}). Run as Administrator; some devices block extended info (class 64) but allow the basic list (class 16).";
+                var lengthMismatch =
+                    extNt == StatusInfoLengthMismatch && legNt == StatusInfoLengthMismatch;
+                detail = lengthMismatch
+                    ? $"Could not read system handle tables: both queries returned 0x{extNt:X8} (STATUS_INFO_LENGTH_MISMATCH — buffer too small for this PC's handle count). Try closing heavy apps (browsers, etc.) and retry; if it persists, the snapshot may exceed the app limit."
+                    : $"Could not read system handle tables (extended NtStatus=0x{extNt:X8}; basic=0x{legNt:X8}). Run as Administrator if you have not; some policies block one of these APIs.";
             }
             else if (!extOk && process.Id > 0xFFFF)
             {
@@ -357,26 +360,44 @@ public sealed class MultiInstanceService
         }
     }
 
+    /// <summary>Upper bound for system handle snapshot; machines with huge handle counts need a large buffer.</summary>
+    private const uint MaxHandleTableBufferBytes = 512 * 1024 * 1024;
+
     /// <param name="informationClass"><see cref="NativeMethods.SystemExtendedHandleInformation"/> or <see cref="NativeMethods.SystemHandleInformation"/>.</param>
-    /// <param name="ntStatusOnFailure">Last non-success NTSTATUS when this returns false (0 if buffer grew too large).</param>
+    /// <param name="ntStatusOnFailure">Last non-success NTSTATUS when this returns false.</param>
     private static bool QuerySystemHandleTable(int informationClass, out IntPtr table, out uint size, out int ntStatusOnFailure)
     {
         table = IntPtr.Zero;
         size = 0x10000;
         ntStatusOnFailure = 0;
-        while (size < 0x2000000)
+
+        // STATUS_INFO_LENGTH_MISMATCH (0xC0000004): grow buffer. Must allow trying sizes >= 0x2000000 —
+        // the old "while (size < 0x2000000)" skipped the final double (16MB → 32MB) entirely.
+        while (size <= MaxHandleTableBufferBytes)
         {
             var buf = Marshal.AllocHGlobal((int)size);
             int status = NativeMethods.NtQuerySystemInformation(
                 informationClass,
                 buf,
-                (uint)size,
+                size,
                 out var retLen);
 
             if (status == StatusInfoLengthMismatch)
             {
                 Marshal.FreeHGlobal(buf);
-                size *= 2;
+                uint next = Math.Max(checked(size * 2), retLen);
+                if (next == 0)
+                {
+                    next = size * 2;
+                }
+
+                if (next < size || next > MaxHandleTableBufferBytes)
+                {
+                    ntStatusOnFailure = StatusInfoLengthMismatch;
+                    return false;
+                }
+
+                size = next;
                 continue;
             }
 
