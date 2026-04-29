@@ -4,7 +4,7 @@ Copyright © 2026 **Khu72**. All rights reserved.
 
 ## Ownership
 
-This software, its source code, documentation, assets (including icons and branding), and related materials (collectively, the **“Software”**) are owned by **Khu72** unless otherwise stated.
+This software, its source code, documentation, and related materials (collectively, the **“Software”**) are owned by **Khu72** unless otherwise stated.
 
 ## Use
 
