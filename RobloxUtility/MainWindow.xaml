@@ -11,7 +11,9 @@
         TextOptions.TextFormattingMode="Display"
         UseLayoutRounding="True"
         Loaded="Window_Loaded"
-        Closing="Window_Closing">
+        Closing="Window_Closing"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewMouseDown="Window_PreviewMouseDown">
   <Window.Resources>
     <BitmapImage x:Key="AppLogo"
                  UriSource="pack://application:,,,/Assets/brand.png"
@@ -33,7 +35,7 @@
 
     <TabControl x:Name="RootTabs" Grid.Row="1" VerticalAlignment="Stretch" MinHeight="520">
       <!-- Multi-instance -->
-      <TabItem Header="Multi-instance">
+      <TabItem Header="Multi-Instance">
         <Grid Margin="0,4,0,0">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -41,7 +43,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" MinHeight="80" />
           </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" Text="Multi-instance" Style="{StaticResource H1}" />
+          <TextBlock Grid.Row="0" Text="Multi-Instance" Style="{StaticResource H1}" />
           <TextBlock Grid.Row="1" Margin="0,10,0,0" Style="{StaticResource Body}"
                      Text="Roblox keeps a named kernel object (often shown as \BaseNamedObjects\ROBLOX_singletonEvent) so only one client is allowed. This app finds that handle in running RobloxPlayerBeta.exe and closes it so you can open more than one. Run as Administrator if you get &quot;Access denied&quot;." />
           <Button Grid.Row="2" x:Name="EnableMultiInstanceButton" Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" MinWidth="260"
@@ -193,6 +195,28 @@
               <CheckBox x:Name="AutoClickEnabled" Content="Enable auto clicker" Style="{StaticResource EmphasisCheckBox}"
                         Checked="AutoClickSetting_Changed" Unchecked="AutoClickSetting_Changed" />
             </Border>
+            <Border Style="{StaticResource AutoClickEnablePill}" Margin="0,10,0,0" Padding="14,12" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <CheckBox x:Name="AutoHotkeyEnabled" Content="Enable keybind (toggle on/off)" Style="{StaticResource EmphasisCheckBox}"
+                        Checked="KeybindSetting_Changed" Unchecked="KeybindSetting_Changed" />
+            </Border>
+            <Border Margin="0,10,0,0" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="10" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" Style="{StaticResource Caption}" Text="Keybind" />
+                <Button x:Name="AutoHotkeyButton" Grid.Column="2" MinWidth="120" MaxWidth="170" MinHeight="30"
+                        HorizontalAlignment="Left" VerticalAlignment="Center" Content="F6"
+                        Click="AutoHotkeyButton_Click"
+                        ToolTip="Click, then press a keyboard key or middle/side mouse button." />
+              </Grid>
+            </Border>
+            <Border Style="{StaticResource AutoClickEnablePill}" Margin="0,10,0,0" Padding="14,12" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <CheckBox x:Name="AutoHotkeyNotifyEnabled" Content="Notify when keybind toggles auto clicker" Style="{StaticResource EmphasisCheckBox}"
+                        Checked="KeybindSetting_Changed" Unchecked="KeybindSetting_Changed" />
+            </Border>
             <Border Margin="0,16,0,0" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" ClipToBounds="True">
               <TextBlock x:Name="AutoStatus" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" FontSize="13" LineHeight="20" />
             </Border>
@@ -245,7 +269,7 @@
             <RowDefinition Height="*" />
           </Grid.RowDefinitions>
           <DockPanel Grid.Row="0" Margin="0,0,0,10" LastChildFill="False">
-            <TextBlock DockPanel.Dock="Left" Text="Application log" Style="{StaticResource H1}" VerticalAlignment="Center" />
+            <TextBlock DockPanel.Dock="Left" Text="Application Logs" Style="{StaticResource H1}" VerticalAlignment="Center" />
             <Button DockPanel.Dock="Right" x:Name="ConsoleClearButton" Content="Clear" MinWidth="72" Click="ConsoleClear_Click" VerticalAlignment="Center" />
           </DockPanel>
           <Border Grid.Row="1" Background="#FF0D1117" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8">

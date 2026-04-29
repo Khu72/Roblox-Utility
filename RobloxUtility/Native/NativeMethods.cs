@@ -148,6 +148,12 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern int GetWindowTextLength(IntPtr hWnd);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
     [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
     public static extern void MouseEvent(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);
 
@@ -207,6 +213,8 @@ internal static class NativeMethods
     public const int WhMouseLl = 14;
     public const int WmLButtonDown = 0x0201;
     public const int WmLButtonUp = 0x0202;
+    public const int WmMButtonDown = 0x0207;
+    public const int WmXButtonDown = 0x020B;
     public const int LlmhfInjected = 0x00000001;
     public const int LlmhfLowerIlInjected = 0x00000002;
 

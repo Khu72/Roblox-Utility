@@ -1,7 +1,7 @@
 # Builds a self-contained publish folder (and optional zip) for end users.
 # Requires .NET 8 SDK only on the machine that runs this script - not on players' PCs.
 param(
-    [string] $OutputDir = (Join-Path $PSScriptRoot "..\artifacts\publish-win-x64"),
+    [string] $OutputDir = (Join-Path $PSScriptRoot "..\artifacts\R-Utility"),
     [switch] $Zip
 )
 

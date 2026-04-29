@@ -44,7 +44,7 @@ Optional ZIP next to the publish folder:
 .\scripts\Publish-Portable.ps1 -Zip
 ```
 
-Default output: `artifacts\publish-win-x64\` (gitignored).
+Default output: `artifacts\R-Utility\` (gitignored).
 
 ### Manual `dotnet publish` (same as CI)
 

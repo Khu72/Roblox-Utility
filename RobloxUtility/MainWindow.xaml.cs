@@ -1,7 +1,13 @@
 using System.Collections.Specialized;
+using System.Drawing;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using Forms = System.Windows.Forms;
 using RobloxUtility.Models;
+using RobloxUtility.Native;
 using RobloxUtility.Services;
 
 namespace RobloxUtility;
@@ -15,7 +21,26 @@ public partial class MainWindow
     private readonly MultiInstanceService _multi = new();
     private readonly AutoClickerService _autoClicker;
     private readonly AutoClickerSettingsStore _autoStore = new();
+    private HwndSource? _hwndSource;
+    private const int AutoHotkeyId = 0x4A11;
+    private const int WmHotkey = 0x0312;
+    private bool _hotkeyRegistered;
+    private bool _awaitingHotkeyInput;
+    private string _selectedHotkeyCanonical = "F6";
+    private nint _mouseHotkeyHook;
+    private NativeMethods.LowLevelMouseProc? _mouseHotkeyProc;
+    private HotkeyBindingType _mouseBindingType = HotkeyBindingType.None;
+    private Forms.NotifyIcon? _notifyIcon;
     private bool _suppressAutoPersist;
+    private enum HotkeyBindingType
+    {
+        None = 0,
+        Keyboard = 1,
+        MouseMiddle = 2,
+        MouseXButton1 = 3,
+        MouseXButton2 = 4
+    }
+
     private bool _suppressExperienceCombo;
     private bool _suppressPlacesPlaceCombo;
 
@@ -68,9 +93,17 @@ public partial class MainWindow
             CpsSlider.Value = savedAuto.ClicksPerSecond;
             InitialDelaySlider.Value = savedAuto.InitialDelayMs;
             ExtraDelaySlider.Value = savedAuto.ExtraDelayPerClickMs;
+            AutoHotkeyEnabled.IsChecked = savedAuto.EnableKeybind;
+            AutoHotkeyNotifyEnabled.IsChecked = savedAuto.NotifyOnKeybindToggle;
+            SetHotkeyText(savedAuto.Keybind);
+        }
+        else
+        {
+            SetHotkeyText("F6");
         }
         _suppressAutoPersist = false;
 
+        SetupHotkeyHook();
         RefreshAutoLabels();
         _autoClicker.SetRunning(true);
         PushAutoConfig();
@@ -131,6 +164,17 @@ public partial class MainWindow
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        UnregisterAutoHotkey();
+        if (_hwndSource is not null)
+        {
+            _hwndSource.RemoveHook(WndProc);
+            _hwndSource = null;
+        }
+
+        UnregisterMouseHotkey();
+        _notifyIcon?.Dispose();
+        _notifyIcon = null;
+
         AppLog.UiLogLine -= OnAppLogUiLine;
         _autoClicker.SetRunning(false);
         _autoClicker.Dispose();
@@ -286,7 +330,7 @@ public partial class MainWindow
     {
         if (_store.Accounts.Any(a => string.IsNullOrWhiteSpace(a.DisplayName)))
         {
-            _ = MessageBox.Show(
+            _ = System.Windows.MessageBox.Show(
                 "The current account needs a display name. Save it or remove it before you add another.",
                 "Roblox Utility",
                 MessageBoxButton.OK,
@@ -359,7 +403,7 @@ public partial class MainWindow
         var name = (AccName.Text ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(name))
         {
-            _ = MessageBox.Show("Display name is required (cannot be blank).", "Roblox Utility", MessageBoxButton.OK, MessageBoxImage.Warning);
+            _ = System.Windows.MessageBox.Show("Display name is required (cannot be blank).", "Roblox Utility", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -372,7 +416,7 @@ public partial class MainWindow
         {
             if (!PlaceIdValidation.TryParse(AccPlaceId.Text, out var pl))
             {
-                _ = MessageBox.Show(
+                _ = System.Windows.MessageBox.Show(
                     "Set a place ID: digits only, no letters or other symbols, and a valid Roblox universe ID (1 or more). " +
                     "Or pick a saved place from the list (not the Custom line).",
                     "Roblox Utility",
@@ -547,7 +591,7 @@ public partial class MainWindow
     {
         if (_placeStore.Places.Any(p => string.IsNullOrWhiteSpace(p.Name) && p.PlaceId == 0))
         {
-            _ = MessageBox.Show(
+            _ = System.Windows.MessageBox.Show(
                 "Fill in the current place (name and a valid place ID) and save it, or remove it, before you add another.",
                 "Roblox Utility",
                 MessageBoxButton.OK,
@@ -634,13 +678,13 @@ public partial class MainWindow
         var name = (PlaceNameBox.Text ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(name))
         {
-            _ = MessageBox.Show("Display name is required (cannot be blank).", "Roblox Utility", MessageBoxButton.OK, MessageBoxImage.Warning);
+            _ = System.Windows.MessageBox.Show("Display name is required (cannot be blank).", "Roblox Utility", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
         if (!PlaceIdValidation.TryParse(PlaceIdBox.Text, out var id))
         {
-            _ = MessageBox.Show(
+            _ = System.Windows.MessageBox.Show(
                 "Place ID must be a valid Roblox universe ID: digits only (no letters or symbols), between 1 and 9,223,372,036,854,775,807.",
                 "Roblox Utility",
                 MessageBoxButton.OK,
@@ -720,15 +764,99 @@ public partial class MainWindow
         PushAutoConfig();
     }
 
+    private void KeybindSetting_Changed(object sender, RoutedEventArgs e)
+    {
+        RefreshAutoLabels();
+        PushAutoConfig();
+    }
+
+    private void AutoHotkeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        _awaitingHotkeyInput = true;
+        AutoHotkeyButton.Content = "Awaiting input...";
+        AutoHotkeyButton.Focus();
+    }
+
+    private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!_awaitingHotkeyInput)
+        {
+            return;
+        }
+
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Escape)
+        {
+            _awaitingHotkeyInput = false;
+            AutoHotkeyButton.Content = ToHotkeyDisplay(_selectedHotkeyCanonical);
+            RefreshAutoLabels();
+            e.Handled = true;
+            return;
+        }
+
+        if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        _awaitingHotkeyInput = false;
+        SetHotkeyText(NormalizeKeyText(key));
+        RefreshAutoLabels();
+        PushAutoConfig();
+        e.Handled = true;
+    }
+
+    private void Window_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!_awaitingHotkeyInput)
+        {
+            return;
+        }
+
+        string? mouseBind = e.ChangedButton switch
+        {
+            MouseButton.Middle => "MIDDLEMOUSE",
+            MouseButton.XButton1 => "XBUTTON1",
+            MouseButton.XButton2 => "XBUTTON2",
+            _ => null
+        };
+        if (mouseBind is null)
+        {
+            return;
+        }
+
+        _awaitingHotkeyInput = false;
+        SetHotkeyText(mouseBind);
+        RefreshAutoLabels();
+        PushAutoConfig();
+        e.Handled = true;
+    }
+
     private void RefreshAutoLabels()
     {
+        if (AutoStatus is null || AutoHotkeyEnabled is null || AutoHotkeyNotifyEnabled is null || AutoHotkeyButton is null)
+        {
+            return;
+        }
+
         CpsBigValue.Text = ((int)CpsSlider.Value).ToString();
         InitialDelayBigValue.Text = ((int)InitialDelaySlider.Value).ToString();
         ExtraDelayBigValue.Text = ((int)ExtraDelaySlider.Value).ToString();
         var en = AutoClickEnabled.IsChecked == true;
-        AutoStatus.Text = en
+        var keybind = GetSelectedHotkeyDisplay();
+        var keybindOn = AutoHotkeyEnabled.IsChecked == true;
+        var notifyOnToggle = AutoHotkeyNotifyEnabled.IsChecked == true;
+        var keybindState = _awaitingHotkeyInput
+            ? "Awaiting input..."
+            : keybindOn
+            ? (_hotkeyRegistered ? $"Keybind ON ({keybind}) — press to toggle auto clicker." : $"Keybind ON ({keybind}) — could not register (already in use).")
+            : "Keybind OFF.";
+        var notifyState = notifyOnToggle ? "Notifications ON." : "Notifications OFF.";
+        AutoStatus.Text = (en
             ? "Enabled — when Roblox is focused, hold the left mouse button to auto-click at the rate above."
-            : "Disabled — turn on to activate (no clicks are sent while off).";
+            : "Disabled — turn on to activate (no clicks are sent while off).")
+            + " " + keybindState + " " + notifyState;
     }
 
     private void PushAutoConfig()
@@ -738,13 +866,262 @@ public partial class MainWindow
             Enabled = AutoClickEnabled.IsChecked == true,
             ClicksPerSecond = CpsSlider.Value,
             InitialDelayMs = (int)InitialDelaySlider.Value,
-            ExtraDelayPerClickMs = (int)ExtraDelaySlider.Value
+            ExtraDelayPerClickMs = (int)ExtraDelaySlider.Value,
+            EnableKeybind = AutoHotkeyEnabled.IsChecked == true,
+            Keybind = GetSelectedHotkeyText(),
+            NotifyOnKeybindToggle = AutoHotkeyNotifyEnabled.IsChecked == true
         };
 
         _autoClicker.UpdateConfig(cfg);
+        UpdateAutoHotkeyRegistration(cfg);
         if (!_suppressAutoPersist)
         {
             _autoStore.Save(cfg);
         }
+    }
+
+    private void SetHotkeyText(string keyText)
+    {
+        _selectedHotkeyCanonical = string.IsNullOrWhiteSpace(keyText) ? "F6" : keyText.Trim().ToUpperInvariant();
+        AutoHotkeyButton.Content = ToHotkeyDisplay(_selectedHotkeyCanonical);
+    }
+
+    private string GetSelectedHotkeyText()
+    {
+        return _selectedHotkeyCanonical;
+    }
+
+    private string GetSelectedHotkeyDisplay()
+    {
+        return AutoHotkeyButton.Content?.ToString() ?? ToHotkeyDisplay(_selectedHotkeyCanonical);
+    }
+
+    private void SetupHotkeyHook()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _hwndSource = HwndSource.FromHwnd(hwnd);
+        _hwndSource?.AddHook(WndProc);
+    }
+
+    private void UpdateAutoHotkeyRegistration(AutoClickerConfig cfg)
+    {
+        UnregisterAutoHotkey();
+        if (!cfg.EnableKeybind || _hwndSource is null)
+        {
+            return;
+        }
+
+        var bind = ParseHotkeyBinding(cfg.Keybind, out var vk);
+        if (bind == HotkeyBindingType.Keyboard)
+        {
+            if (vk == 0)
+            {
+                vk = 0x75; // F6
+            }
+
+            var hwnd = _hwndSource.Handle;
+            _hotkeyRegistered = NativeMethods.RegisterHotKey(hwnd, AutoHotkeyId, 0, vk);
+            if (!_hotkeyRegistered)
+            {
+                AppLog.Warn($"Auto clicker keybind '{cfg.Keybind}' could not register (already used by another app).");
+            }
+
+            return;
+        }
+
+        if (bind is HotkeyBindingType.MouseMiddle or HotkeyBindingType.MouseXButton1 or HotkeyBindingType.MouseXButton2)
+        {
+            RegisterMouseHotkey(bind);
+            _hotkeyRegistered = _mouseHotkeyHook != nint.Zero;
+            if (!_hotkeyRegistered)
+            {
+                AppLog.Warn($"Auto clicker keybind '{cfg.Keybind}' could not register.");
+            }
+
+            return;
+        }
+
+        AppLog.Warn($"Auto clicker keybind '{cfg.Keybind}' is not valid.");
+    }
+
+    private void UnregisterAutoHotkey()
+    {
+        UnregisterMouseHotkey();
+
+        if (_hwndSource is null || !_hotkeyRegistered)
+        {
+            _hotkeyRegistered = false;
+            return;
+        }
+
+        _ = NativeMethods.UnregisterHotKey(_hwndSource.Handle, AutoHotkeyId);
+        _hotkeyRegistered = false;
+    }
+
+    private void RegisterMouseHotkey(HotkeyBindingType binding)
+    {
+        _mouseBindingType = binding;
+        _mouseHotkeyProc ??= MouseHotkeyHookCallback;
+        var module = NativeMethods.GetModuleHandle(null);
+        _mouseHotkeyHook = NativeMethods.SetWindowsHookEx(NativeMethods.WhMouseLl, _mouseHotkeyProc, module, 0);
+    }
+
+    private void UnregisterMouseHotkey()
+    {
+        if (_mouseHotkeyHook != nint.Zero)
+        {
+            _ = NativeMethods.UnhookWindowsHookEx(_mouseHotkeyHook);
+            _mouseHotkeyHook = nint.Zero;
+        }
+
+        _mouseBindingType = HotkeyBindingType.None;
+    }
+
+    private nint MouseHotkeyHookCallback(int nCode, nint wParam, nint lParam)
+    {
+        if (nCode >= 0 && lParam != nint.Zero)
+        {
+            var info = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+            var injected = (info.Flags & (NativeMethods.LlmhfInjected | NativeMethods.LlmhfLowerIlInjected)) != 0;
+            if (!injected && IsMatchingMouseBinding(wParam, info))
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    AutoClickEnabled.IsChecked = AutoClickEnabled.IsChecked != true;
+                    if (AutoHotkeyNotifyEnabled.IsChecked == true)
+                    {
+                        ShowToggleNotification(AutoClickEnabled.IsChecked == true);
+                    }
+                });
+            }
+        }
+
+        return NativeMethods.CallNextHookEx(_mouseHotkeyHook, nCode, wParam, lParam);
+    }
+
+    private bool IsMatchingMouseBinding(nint wParam, NativeMethods.MSLLHOOKSTRUCT info)
+    {
+        return _mouseBindingType switch
+        {
+            HotkeyBindingType.MouseMiddle => wParam == NativeMethods.WmMButtonDown,
+            HotkeyBindingType.MouseXButton1 => wParam == NativeMethods.WmXButtonDown && ((info.MouseData >> 16) & 0xFFFF) == 1,
+            HotkeyBindingType.MouseXButton2 => wParam == NativeMethods.WmXButtonDown && ((info.MouseData >> 16) & 0xFFFF) == 2,
+            _ => false
+        };
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotkey && wParam.ToInt32() == AutoHotkeyId)
+        {
+            AutoClickEnabled.IsChecked = AutoClickEnabled.IsChecked != true;
+            if (AutoHotkeyNotifyEnabled.IsChecked == true)
+            {
+                ShowToggleNotification(AutoClickEnabled.IsChecked == true);
+            }
+
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private static string NormalizeKeyText(Key key)
+    {
+        if (key is >= Key.A and <= Key.Z)
+        {
+            var c = (char)('A' + (key - Key.A));
+            return c.ToString();
+        }
+
+        if (key is >= Key.D0 and <= Key.D9)
+        {
+            var c = (char)('0' + (key - Key.D0));
+            return c.ToString();
+        }
+
+        return key.ToString().ToUpperInvariant();
+    }
+
+    private static string ToHotkeyDisplay(string canonical)
+    {
+        var t = (canonical ?? string.Empty).Trim().ToUpperInvariant();
+        return t switch
+        {
+            "MIDDLEMOUSE" or "MMB" => "Middle Mouse",
+            "XBUTTON1" or "MOUSE4" or "SIDE1" => "Mouse Side 1",
+            "XBUTTON2" or "MOUSE5" or "SIDE2" => "Mouse Side 2",
+            _ => t
+        };
+    }
+
+    private static HotkeyBindingType ParseHotkeyBinding(string text, out uint vk)
+    {
+        vk = 0;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return HotkeyBindingType.None;
+        }
+
+        var t = text.Trim().ToUpperInvariant();
+        if (t is "MIDDLEMOUSE" or "MMB")
+        {
+            return HotkeyBindingType.MouseMiddle;
+        }
+
+        if (t is "XBUTTON1" or "MOUSE4" or "SIDE1")
+        {
+            return HotkeyBindingType.MouseXButton1;
+        }
+
+        if (t is "XBUTTON2" or "MOUSE5" or "SIDE2")
+        {
+            return HotkeyBindingType.MouseXButton2;
+        }
+
+        if (t.Length == 1 && t[0] >= 'A' && t[0] <= 'Z')
+        {
+            vk = (uint)t[0];
+            return HotkeyBindingType.Keyboard;
+        }
+
+        if (t.Length == 1 && t[0] >= '0' && t[0] <= '9')
+        {
+            vk = (uint)t[0];
+            return HotkeyBindingType.Keyboard;
+        }
+
+        if (Enum.TryParse<Key>(t, ignoreCase: true, out var key))
+        {
+            vk = (uint)KeyInterop.VirtualKeyFromKey(key);
+            return vk != 0 ? HotkeyBindingType.Keyboard : HotkeyBindingType.None;
+        }
+
+        if (t.StartsWith("NUMPAD") && int.TryParse(t["NUMPAD".Length..], out var np) && np >= 0 && np <= 9)
+        {
+            vk = 0x60u + (uint)np;
+            return HotkeyBindingType.Keyboard;
+        }
+
+        return HotkeyBindingType.None;
+    }
+
+    private void ShowToggleNotification(bool enabled)
+    {
+        _notifyIcon ??= new Forms.NotifyIcon
+        {
+            Icon = SystemIcons.Information,
+            Visible = true
+        };
+
+        _notifyIcon.BalloonTipTitle = "Roblox Utility";
+        _notifyIcon.BalloonTipText = enabled ? "Auto clicker activated (keybind)." : "Auto clicker deactivated (keybind).";
+        _notifyIcon.BalloonTipIcon = Forms.ToolTipIcon.Info;
+        _notifyIcon.ShowBalloonTip(2000);
     }
 }

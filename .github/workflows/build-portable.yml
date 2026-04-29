@@ -1,5 +1,6 @@
 # Produces a self-contained Windows build: no .NET SDK or runtime needed on the player's PC.
-# Download the ZIP from the workflow run's "Artifacts", or attach it to a GitHub Release.
+# Workflow artifact uploads the publish folder directly (single zip layer on download).
+# For tag builds, a release zip is attached to the GitHub Release page.
 name: Build portable (self-contained)
 
 on:
@@ -26,17 +27,18 @@ jobs:
           dotnet publish RobloxUtility/RobloxUtility.csproj
           -c Release -r win-x64
           -p:PublishSingleFile=true -p:SelfContained=true
-          -o "${{ github.workspace }}/publish"
-
-      - name: Zip
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "${{ github.workspace }}/publish/*" -DestinationPath "${{ github.workspace }}/RobloxUtility-win-x64-self-contained.zip" -Force
+          -o "${{ github.workspace }}/R-Utility"
 
       - uses: actions/upload-artifact@v4
         with:
           name: RobloxUtility-win-x64-self-contained
-          path: RobloxUtility-win-x64-self-contained.zip
+          path: ${{ github.workspace }}/R-Utility
+
+      - name: Zip (for release attachment only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ github.workspace }}/R-Utility/*" -DestinationPath "${{ github.workspace }}/RobloxUtility-win-x64-self-contained.zip" -Force
 
       - name: Attach to GitHub Release (when tag push)
         if: startsWith(github.ref, 'refs/tags/v')

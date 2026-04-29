@@ -12,6 +12,9 @@ public sealed class AutoClickerConfig
     public double ClicksPerSecond { get; set; } = 8;
     public int InitialDelayMs { get; set; } = 0;
     public int ExtraDelayPerClickMs { get; set; } = 0;
+    public bool EnableKeybind { get; set; }
+    public string Keybind { get; set; } = "F6";
+    public bool NotifyOnKeybindToggle { get; set; }
 }
 
 /// <summary>
