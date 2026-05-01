@@ -1,6 +1,7 @@
 <Window x:Class="RobloxUtility.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:models="clr-namespace:RobloxUtility.Models"
         Title="Roblox Utility"
         Icon="{DynamicResource AppLogo}"
         Height="780" Width="940"
@@ -64,7 +65,16 @@
           </Grid.ColumnDefinitions>
           <Border Grid.Column="0" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="10">
             <DockPanel LastChildFill="True">
-              <TextBlock DockPanel.Dock="Top" Text="Saved accounts" Style="{StaticResource H2}" Margin="0,0,0,8" />
+              <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="Saved accounts" Style="{StaticResource H2}" VerticalAlignment="Center" />
+                <Button Grid.Column="1" x:Name="RefreshAccountsPresenceButton" Click="RefreshAccountsPresence_Click"
+                        Content="Refresh" Padding="12,6" MinHeight="28" VerticalAlignment="Center"
+                        ToolTip="Re-check online / in-game status using each account's saved cookie" />
+              </Grid>
               <Grid DockPanel.Dock="Bottom" Margin="0,10,0,0">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*" />
@@ -76,7 +86,44 @@
                 <Button Grid.Column="2" x:Name="DeleteAccountButton" Click="DeleteAccount_Click" HorizontalAlignment="Stretch" MinHeight="32"
                         Content="Remove" />
               </Grid>
-              <ListBox x:Name="AccountsList" Style="{StaticResource SavedLeftList}" SelectionChanged="AccountsList_SelectionChanged" DisplayMemberPath="ListLabel" />
+              <ListBox x:Name="AccountsList" Style="{StaticResource SavedLeftList}" SelectionChanged="AccountsList_SelectionChanged">
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="{x:Type models:AccountRecord}">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Grid.Column="0" Text="{Binding ListLabel}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                      <Grid Grid.Column="1" Width="20" Height="18" Margin="8,0,0,0">
+                        <Ellipse x:Name="OnlineDot" Width="10" Height="10" Fill="{StaticResource Accent}" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed" />
+                        <Ellipse x:Name="InGameDot" Width="10" Height="10" Fill="{StaticResource SuccessBrush}" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed" />
+                        <Ellipse x:Name="OfflineDot" Width="10" Height="10" Fill="#FF6B6E80" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed" />
+                        <TextBlock x:Name="InvalidGlyph" FontFamily="Segoe MDL2 Assets" Text="&#xE783;" FontSize="14"
+                                   Foreground="#FFE85D5D" VerticalAlignment="Center" HorizontalAlignment="Center" Visibility="Collapsed"
+                                   ToolTip="Saved cookie is invalid or expired — paste a fresh .ROBLOSECURITY and Save." />
+                      </Grid>
+                    </Grid>
+                    <DataTemplate.Triggers>
+                      <DataTrigger Binding="{Binding PresenceKind}" Value="{x:Static models:AccountPresenceKind.Online}">
+                        <Setter TargetName="OnlineDot" Property="UIElement.Visibility" Value="Visible" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding PresenceKind}" Value="{x:Static models:AccountPresenceKind.InStudio}">
+                        <Setter TargetName="OnlineDot" Property="UIElement.Visibility" Value="Visible" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding PresenceKind}" Value="{x:Static models:AccountPresenceKind.InGame}">
+                        <Setter TargetName="InGameDot" Property="UIElement.Visibility" Value="Visible" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding PresenceKind}" Value="{x:Static models:AccountPresenceKind.Offline}">
+                        <Setter TargetName="OfflineDot" Property="UIElement.Visibility" Value="Visible" />
+                      </DataTrigger>
+                      <DataTrigger Binding="{Binding PresenceKind}" Value="{x:Static models:AccountPresenceKind.InvalidCookie}">
+                        <Setter TargetName="InvalidGlyph" Property="UIElement.Visibility" Value="Visible" />
+                      </DataTrigger>
+                    </DataTemplate.Triggers>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
             </DockPanel>
           </Border>
 

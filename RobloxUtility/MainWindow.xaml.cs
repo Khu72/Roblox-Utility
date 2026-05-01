@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.Drawing;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -43,6 +44,7 @@ public partial class MainWindow
 
     private bool _suppressExperienceCombo;
     private bool _suppressPlacesPlaceCombo;
+    private int _presenceRefreshGate;
 
     public MainWindow()
     {
@@ -111,6 +113,64 @@ public partial class MainWindow
         AppLog.UiLogLine += OnAppLogUiLine;
         AppLog.Info($"Loaded {_store.Accounts.Count} account(s), {_placeStore.Places.Count} saved place(s).");
         UpdateAddControls();
+        _ = RefreshAllAccountsPresenceAsync();
+    }
+
+    private async void RefreshAccountsPresence_Click(object sender, RoutedEventArgs e) => await RefreshAllAccountsPresenceAsync();
+
+    private async Task RefreshAllAccountsPresenceAsync()
+    {
+        if (Interlocked.Exchange(ref _presenceRefreshGate, 1) == 1)
+        {
+            return;
+        }
+
+        RefreshAccountsPresenceButton.IsEnabled = false;
+        try
+        {
+            foreach (var a in _store.Accounts.ToList())
+            {
+                AccountPresenceKind kind;
+                if (string.IsNullOrEmpty(a.ProtectedCookieBase64))
+                {
+                    kind = AccountPresenceKind.NoCookie;
+                }
+                else
+                {
+                    var raw = CredentialProtector.UnprotectFromBase64(a.ProtectedCookieBase64);
+                    var clean = RobloxSessionCookie.Sanitize(raw);
+                    if (string.IsNullOrEmpty(clean))
+                    {
+                        kind = AccountPresenceKind.NoCookie;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            kind = await RobloxAccountPresenceService.QueryAsync(clean, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            AppLog.Line("PRESENCE", $"Could not refresh status for “{a.ListLabel}”: {ex.Message}");
+                            kind = AccountPresenceKind.InvalidCookie;
+                        }
+                    }
+                }
+
+                await Dispatcher.InvokeAsync(() => { a.PresenceKind = kind; });
+            }
+        }
+        finally
+        {
+            try
+            {
+                await Dispatcher.InvokeAsync(() => { RefreshAccountsPresenceButton.IsEnabled = true; });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _presenceRefreshGate, 0);
+            }
+        }
     }
 
     private void OnAppLogUiLine(string line)

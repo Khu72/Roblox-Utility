@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 
 namespace RobloxUtility.Models;
 public sealed class AccountRecord : INotifyPropertyChanged
@@ -36,6 +37,24 @@ public sealed class AccountRecord : INotifyPropertyChanged
     public Guid? LinkedPlaceEntryId { get; set; }
 
     public string? ProtectedCookieBase64 { get; set; }
+
+    private AccountPresenceKind _presenceKind = AccountPresenceKind.Unknown;
+
+    [JsonIgnore]
+    public AccountPresenceKind PresenceKind
+    {
+        get => _presenceKind;
+        set
+        {
+            if (_presenceKind == value)
+            {
+                return;
+            }
+
+            _presenceKind = value;
+            Notify();
+        }
+    }
 
     public override string ToString() => ListLabel;
 }
