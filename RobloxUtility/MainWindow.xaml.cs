@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using Forms = System.Windows.Forms;
+using RobloxUtility.Controls;
 using RobloxUtility.Models;
 using RobloxUtility.Native;
 using RobloxUtility.Services;
@@ -81,6 +82,9 @@ public partial class MainWindow
         AccountsList.SelectedItem = _store.Accounts[0];
         PlacesList.SelectedItem = _placeStore.Places[0];
         PlacesTabAccountCombo.SelectedItem = _store.Accounts[0];
+
+        ListReorder.AddReorderCompletedHandler(AccountsList, (_, _) => _store.Save());
+        ListReorder.AddReorderCompletedHandler(PlacesList, (_, _) => _placeStore.Save());
 
         RebuildExperienceComboForAccount();
         RebuildPlacesTabPlaceCombo(selectListMatch: true);

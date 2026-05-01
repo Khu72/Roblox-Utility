@@ -1,6 +1,6 @@
-# Produces a self-contained Windows build: no .NET SDK or runtime needed on the player's PC.
-# Workflow artifact is a zip whose root contains one folder, R-Util/, with all publish outputs inside.
-# For tag builds, a release zip is attached to the GitHub Release page (same layout).
+# Self-contained single-file Windows EXE (win-x64). No .NET install needed on the player's PC.
+# Artifact: zip containing R-Util/ with RobloxUtility.exe (and any sidecar files the host extracts).
+# Tag builds attach the zip to the GitHub Release.
 name: Build portable (self-contained)
 
 on:
@@ -22,11 +22,14 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Publish (self-contained)
+      - name: Publish (self-contained single file)
         run: >
           dotnet publish RobloxUtility/RobloxUtility.csproj
-          -c Release -r win-x64
-          -p:PublishSingleFile=true -p:SelfContained=true
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=false
+          -p:PublishTrimmed=false
           -o "${{ github.workspace }}/staging/R-Util"
 
       - uses: actions/upload-artifact@v6

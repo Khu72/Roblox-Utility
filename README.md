@@ -9,10 +9,10 @@ You **cannot** build this project without the .NET SDK — but you **do not need
 1. **GitHub (recommended after you enable Actions)**  
    - Open the **Actions** tab → workflow **Build portable (self-contained)** → run it, or push a tag like `v1.0.0` to trigger it and attach the ZIP to a Release.  
    - Download **`RobloxUtility-win-x64-self-contained.zip`** from the run’s **Artifacts** (or from **Releases** if you use version tags).  
-   - Extract the ZIP and run **`RobloxUtility.exe`**. Keep **all files** in that folder together (WPF may ship native DLLs next to the EXE).
+   - Extract the ZIP and run **`RobloxUtility.exe`** (self-contained single file; you can move just the EXE if you prefer).
 
 2. **Someone built it for you**  
-   - They run the publish script (below) and give you the output folder or ZIP. Same rule: extract and run the EXE; don’t delete companion DLLs.
+   - They run **`Publish-FriendExe.cmd`** (or the MSBuild target below) and share **`RobloxUtility.exe`** from the `publish` folder.
 
 There is no supported way to make **cloning the repo and compiling** work without installing the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — that is what compiles C#.
 
@@ -32,25 +32,30 @@ dotnet run --project .\RobloxUtility\RobloxUtility.csproj -c Release
 
 ### One-command portable build (maintainers)
 
-From the repo root:
+From the repo root (next to `RobloxUtility.sln`):
 
 ```powershell
-.\scripts\Publish-Portable.ps1
+.\Publish-FriendExe.cmd
 ```
 
-Optional ZIP next to the publish folder:
+Or:
 
 ```powershell
-.\scripts\Publish-Portable.ps1 -Zip
+dotnet msbuild .\RobloxUtility\RobloxUtility.csproj -t:PublishFriendExe
 ```
 
-Default output: `artifacts\R-Util\` (gitignored).
+Output: `RobloxUtility\bin\Release\net8.0-windows\win-x64\publish\RobloxUtility.exe`
 
-### Manual `dotnet publish` (same as CI)
+### Manual `dotnet publish` (same settings as CI)
+
+`EnableCompressionInSingleFile` must stay **false** or the EXE may fail to start.
 
 ```powershell
-dotnet publish .\RobloxUtility\RobloxUtility.csproj -c Release -r win-x64 `
-  -p:PublishSingleFile=true -p:SelfContained=true `
+dotnet publish .\RobloxUtility\RobloxUtility.csproj -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true `
+  -p:EnableCompressionInSingleFile=false `
+  -p:PublishTrimmed=false `
   -o "D:\Path\You\Choose\RobloxUtility"
 ```
 

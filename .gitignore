@@ -15,6 +15,7 @@
 _out/
 artifacts/
 **/publish/
+_verify_*/
 
 # OS
 Thumbs.db

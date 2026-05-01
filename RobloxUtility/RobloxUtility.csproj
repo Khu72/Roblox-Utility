@@ -1,5 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    One self-contained EXE (win-x64). Do not use EnableCompressionInSingleFile: it breaks the apphost (EXE looks for a sibling .dll).
+    From repo folder (next to RobloxUtility.sln):
+      dotnet msbuild RobloxUtility\RobloxUtility.csproj -t:PublishFriendExe
+    Or: Publish-FriendExe.cmd
+    Output: RobloxUtility\bin\Release\net8.0-windows\win-x64\publish\RobloxUtility.exe
+  -->
+  <Target Name="PublishFriendExe">
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=false -p:PublishTrimmed=false -p:DebugType=none -p:DebugSymbols=false"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+  </Target>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
