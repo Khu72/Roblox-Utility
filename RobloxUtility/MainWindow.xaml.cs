@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Drawing;
 using System.Threading;
@@ -46,6 +47,8 @@ public partial class MainWindow
     private bool _suppressExperienceCombo;
     private bool _suppressPlacesPlaceCombo;
     private int _presenceRefreshGate;
+    private int _friendsRefreshGate;
+    private readonly ObservableCollection<OnlineFriendRow> _onlineFriends = new();
 
     public MainWindow()
     {
@@ -62,6 +65,7 @@ public partial class MainWindow
         _placeStore.Load();
         AccountsList.ItemsSource = _store.Accounts;
         PlacesList.ItemsSource = _placeStore.Places;
+        OnlineFriendsList.ItemsSource = _onlineFriends;
 
         _placeStore.Places.CollectionChanged += Places_CollectionChanged;
         _store.Accounts.CollectionChanged += Accounts_CollectionChanged;
@@ -121,6 +125,179 @@ public partial class MainWindow
     }
 
     private async void RefreshAccountsPresence_Click(object sender, RoutedEventArgs e) => await RefreshAllAccountsPresenceAsync();
+
+    private async void RefreshOnlineFriends_Click(object sender, RoutedEventArgs e) => await RefreshOnlineFriendsAsync();
+
+    private async Task RefreshOnlineFriendsAsync()
+    {
+        if (Interlocked.Exchange(ref _friendsRefreshGate, 1) == 1)
+        {
+            return;
+        }
+
+        RefreshOnlineFriendsButton.IsEnabled = false;
+        OnlineFriendsStatus.Text = "Loading online friends from saved accounts…";
+        try
+        {
+            var queries = new List<AccountFriendQuery>();
+            foreach (var a in _store.Accounts)
+            {
+                if (string.IsNullOrEmpty(a.ProtectedCookieBase64))
+                {
+                    continue;
+                }
+
+                var raw = CredentialProtector.UnprotectFromBase64(a.ProtectedCookieBase64);
+                var clean = RobloxSessionCookie.Sanitize(raw);
+                if (string.IsNullOrEmpty(clean))
+                {
+                    continue;
+                }
+
+                queries.Add(new AccountFriendQuery(a.Id, a.ListLabel, clean));
+            }
+
+            if (queries.Count == 0)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    _onlineFriends.Clear();
+                    OnlineFriendsStatus.Text = "No accounts with a saved cookie. Add a .ROBLOSECURITY on the Accounts tab, then refresh.";
+                });
+                return;
+            }
+
+            var aggregates = await RobloxFriendsPresenceService.FetchOnlineFriendsAcrossAccountsAsync(queries, CancellationToken.None)
+                .ConfigureAwait(false);
+
+            var placePriority = _placeStore.Places
+                .Select((p, idx) => (p.PlaceId, idx))
+                .Where(t => t.PlaceId > 0)
+                .GroupBy(t => t.PlaceId)
+                .ToDictionary(g => g.Key, g => g.Min(t => t.idx));
+
+            var ordered = aggregates
+                .OrderBy(a => GroupRank(a))
+                .ThenBy(a => SavedPlaceRank(a, placePriority))
+                .ThenBy(a => string.IsNullOrWhiteSpace(a.GameText) ? "\uFFFF" : a.GameText, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(a => string.IsNullOrWhiteSpace(a.DisplayName) ? a.Username : a.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(a => a.Username, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var rows = ordered.Select(a => new OnlineFriendRow
+            {
+                UserId = a.UserId,
+                Username = a.Username,
+                DisplayName = a.DisplayName,
+                GameText = a.GameText,
+                OnAccountsText = string.Join(", ", a.AccountLabels.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            }).ToList();
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                _onlineFriends.Clear();
+                foreach (var row in rows)
+                {
+                    _onlineFriends.Add(row);
+                }
+
+                OnlineFriendsStatus.Text = rows.Count == 0
+                    ? $"Checked {queries.Count} account(s) — no friends are online right now."
+                    : $"{rows.Count} online friend(s) across {queries.Count} account(s).";
+            });
+
+            foreach (var (row, agg) in rows.Zip(ordered))
+            {
+                if (!string.IsNullOrEmpty(agg.AvatarUrl))
+                {
+                    await Dispatcher.InvokeAsync(() => row.SetAvatarFromUrl(agg.AvatarUrl));
+                }
+            }
+
+            AppLog.Info($"Online friends: {rows.Count} across {queries.Count} account(s).");
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                OnlineFriendsStatus.Text = $"Could not load friends: {ex.Message}";
+            });
+            AppLog.Line("FRIENDS", ex.Message);
+        }
+        finally
+        {
+            try
+            {
+                await Dispatcher.InvokeAsync(() => { RefreshOnlineFriendsButton.IsEnabled = true; });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _friendsRefreshGate, 0);
+            }
+        }
+    }
+
+    private static int GroupRank(OnlineFriendAggregate a) => a.PresenceType switch
+    {
+        2 => 0, // InGame
+        3 => 1, // InStudio
+        1 => 2, // Online
+        _ => 3
+    };
+
+    private static int SavedPlaceRank(OnlineFriendAggregate a, IReadOnlyDictionary<long, int> placePriority)
+    {
+        if (a.PresenceType == 2 && a.PlaceId is long pid && placePriority.TryGetValue(pid, out var idx))
+        {
+            return idx;
+        }
+
+        return int.MaxValue;
+    }
+
+    private void CopyFriendUsername_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.DataContext is not OnlineFriendRow row)
+        {
+            return;
+        }
+
+        var name = row.Username;
+        if (string.IsNullOrEmpty(name))
+        {
+            return;
+        }
+
+        try
+        {
+            System.Windows.Clipboard.SetText(name);
+            OnlineFriendsStatus.Text = $"Copied username “{name}”.";
+        }
+        catch (Exception ex)
+        {
+            OnlineFriendsStatus.Text = $"Could not copy: {ex.Message}";
+        }
+    }
+
+    private void CopyFriendUserId_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.DataContext is not OnlineFriendRow row)
+        {
+            return;
+        }
+
+        var text = row.UserId.ToString();
+
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+            OnlineFriendsStatus.Text = $"Copied user ID {text}.";
+        }
+        catch (Exception ex)
+        {
+            OnlineFriendsStatus.Text = $"Could not copy: {ex.Message}";
+        }
+    }
 
     private async Task RefreshAllAccountsPresenceAsync()
     {

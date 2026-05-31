@@ -8,6 +8,7 @@ on:
   push:
     tags:
       - "v*"
+      - "[0-9]*"
 
 permissions:
   contents: write
@@ -38,13 +39,13 @@ jobs:
           path: ${{ github.workspace }}/staging
 
       - name: Zip (for release attachment only)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/1.')
         shell: pwsh
         run: |
           Compress-Archive -Path "${{ github.workspace }}/staging/R-Util" -DestinationPath "${{ github.workspace }}/RobloxUtility-win-x64-self-contained.zip" -Force
 
       - name: Attach to GitHub Release (when tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/1.')
         uses: softprops/action-gh-release@v3
         with:
           files: RobloxUtility-win-x64-self-contained.zip
