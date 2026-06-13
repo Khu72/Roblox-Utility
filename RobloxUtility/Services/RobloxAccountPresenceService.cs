@@ -67,6 +67,12 @@ public static class RobloxAccountPresenceService
             req.Content = new StringContent($"{{\"userIds\":[{userId}]}}", Encoding.UTF8, "application/json");
 
             var r = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            if (r.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(400 * (attempt + 1)), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             if (r.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
                 && r.Headers.TryGetValues("x-csrf-token", out var toks))
             {

@@ -46,8 +46,9 @@ public partial class MainWindow
 
     private bool _suppressExperienceCombo;
     private bool _suppressPlacesPlaceCombo;
-    private int _presenceRefreshGate;
-    private int _friendsRefreshGate;
+    private CancellationTokenSource? _presenceRefreshCts;
+    private CancellationTokenSource? _friendsRefreshCts;
+    private int _friendsAvatarGeneration;
     private readonly ObservableCollection<OnlineFriendRow> _onlineFriends = new();
 
     public MainWindow()
@@ -130,12 +131,12 @@ public partial class MainWindow
 
     private async Task RefreshOnlineFriendsAsync()
     {
-        if (Interlocked.Exchange(ref _friendsRefreshGate, 1) == 1)
-        {
-            return;
-        }
+        _friendsRefreshCts?.Cancel();
+        _friendsRefreshCts?.Dispose();
+        _friendsRefreshCts = new CancellationTokenSource();
+        var ct = _friendsRefreshCts.Token;
+        var avatarGeneration = Interlocked.Increment(ref _friendsAvatarGeneration);
 
-        RefreshOnlineFriendsButton.IsEnabled = false;
         OnlineFriendsStatus.Text = "Loading online friends from saved accounts…";
         try
         {
@@ -159,16 +160,33 @@ public partial class MainWindow
 
             if (queries.Count == 0)
             {
-                await Dispatcher.InvokeAsync(() =>
+                if (!ct.IsCancellationRequested)
                 {
-                    _onlineFriends.Clear();
-                    OnlineFriendsStatus.Text = "No accounts with a saved cookie. Add a .ROBLOSECURITY on the Accounts tab, then refresh.";
-                });
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        _onlineFriends.Clear();
+                        OnlineFriendsStatus.Text = "No accounts with a saved cookie. Add a .ROBLOSECURITY on the Accounts tab, then refresh.";
+                    });
+                }
+
                 return;
             }
 
-            var aggregates = await RobloxFriendsPresenceService.FetchOnlineFriendsAcrossAccountsAsync(queries, CancellationToken.None)
+            var result = await RobloxFriendsPresenceService.FetchOnlineFriendsAcrossAccountsAsync(queries, ct)
                 .ConfigureAwait(false);
+            if (ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (!result.HasUsableData)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    OnlineFriendsStatus.Text = result.WarningMessage ?? "Could not load online friends. Showing previous results.";
+                });
+                return;
+            }
 
             var placePriority = _placeStore.Places
                 .Select((p, idx) => (p.PlaceId, idx))
@@ -176,7 +194,7 @@ public partial class MainWindow
                 .GroupBy(t => t.PlaceId)
                 .ToDictionary(g => g.Key, g => g.Min(t => t.idx));
 
-            var ordered = aggregates
+            var ordered = result.Friends
                 .OrderBy(a => GroupRank(a))
                 .ThenBy(a => SavedPlaceRank(a, placePriority))
                 .ThenBy(a => string.IsNullOrWhiteSpace(a.GameText) ? "\uFFFF" : a.GameText, StringComparer.OrdinalIgnoreCase)
@@ -201,39 +219,80 @@ public partial class MainWindow
                     _onlineFriends.Add(row);
                 }
 
-                OnlineFriendsStatus.Text = rows.Count == 0
-                    ? $"Checked {queries.Count} account(s) — no friends are online right now."
-                    : $"{rows.Count} online friend(s) across {queries.Count} account(s).";
+                var status = rows.Count == 0
+                    ? $"Checked {result.AccountsChecked} account(s) — no friends are online right now."
+                    : $"{rows.Count} online friend(s) across {result.AccountsChecked} account(s).";
+                if (!string.IsNullOrWhiteSpace(result.WarningMessage))
+                {
+                    status += $" {result.WarningMessage}";
+                }
+
+                OnlineFriendsStatus.Text = status;
             });
 
-            foreach (var (row, agg) in rows.Zip(ordered))
+            if (rows.Count > 0)
             {
-                if (!string.IsNullOrEmpty(agg.AvatarUrl))
-                {
-                    await Dispatcher.InvokeAsync(() => row.SetAvatarFromUrl(agg.AvatarUrl));
-                }
+                _ = LoadOnlineFriendAvatarsAsync(rows, avatarGeneration, ct);
             }
 
-            AppLog.Info($"Online friends: {rows.Count} across {queries.Count} account(s).");
+            AppLog.Info($"Online friends: {rows.Count} across {result.AccountsChecked} account(s).");
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer refresh replaced this one.
         }
         catch (Exception ex)
         {
+            if (!ct.IsCancellationRequested)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    OnlineFriendsStatus.Text = $"Could not load friends: {ex.Message}";
+                });
+                AppLog.Line("FRIENDS", ex.Message);
+            }
+        }
+    }
+
+    private async Task LoadOnlineFriendAvatarsAsync(
+        IReadOnlyList<OnlineFriendRow> rows,
+        int avatarGeneration,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var avatarUrls = await RobloxFriendsPresenceService.FetchAvatarUrlsAsync(
+                rows.Select(r => r.UserId).ToList(),
+                cancellationToken).ConfigureAwait(false);
+
+            if (cancellationToken.IsCancellationRequested || avatarGeneration != _friendsAvatarGeneration)
+            {
+                return;
+            }
+
             await Dispatcher.InvokeAsync(() =>
             {
-                OnlineFriendsStatus.Text = $"Could not load friends: {ex.Message}";
+                if (avatarGeneration != _friendsAvatarGeneration)
+                {
+                    return;
+                }
+
+                foreach (var row in rows)
+                {
+                    if (avatarUrls.TryGetValue(row.UserId, out var url))
+                    {
+                        row.SetAvatarFromUrl(url);
+                    }
+                }
             });
-            AppLog.Line("FRIENDS", ex.Message);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            try
-            {
-                await Dispatcher.InvokeAsync(() => { RefreshOnlineFriendsButton.IsEnabled = true; });
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _friendsRefreshGate, 0);
-            }
+            // A newer refresh replaced this one.
+        }
+        catch (Exception ex)
+        {
+            AppLog.Line("FRIENDS", $"Could not load friend avatars: {ex.Message}");
         }
     }
 
@@ -301,56 +360,64 @@ public partial class MainWindow
 
     private async Task RefreshAllAccountsPresenceAsync()
     {
-        if (Interlocked.Exchange(ref _presenceRefreshGate, 1) == 1)
+        _presenceRefreshCts?.Cancel();
+        _presenceRefreshCts?.Dispose();
+        _presenceRefreshCts = new CancellationTokenSource();
+        var ct = _presenceRefreshCts.Token;
+
+        var accounts = _store.Accounts.ToList();
+        if (accounts.Count == 0)
         {
             return;
         }
 
-        RefreshAccountsPresenceButton.IsEnabled = false;
         try
         {
-            foreach (var a in _store.Accounts.ToList())
-            {
-                AccountPresenceKind kind;
-                if (string.IsNullOrEmpty(a.ProtectedCookieBase64))
-                {
-                    kind = AccountPresenceKind.NoCookie;
-                }
-                else
-                {
-                    var raw = CredentialProtector.UnprotectFromBase64(a.ProtectedCookieBase64);
-                    var clean = RobloxSessionCookie.Sanitize(raw);
-                    if (string.IsNullOrEmpty(clean))
-                    {
-                        kind = AccountPresenceKind.NoCookie;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            kind = await RobloxAccountPresenceService.QueryAsync(clean, CancellationToken.None).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            AppLog.Line("PRESENCE", $"Could not refresh status for “{a.ListLabel}”: {ex.Message}");
-                            kind = AccountPresenceKind.InvalidCookie;
-                        }
-                    }
-                }
+            var tasks = accounts.Select(a => RefreshSingleAccountPresenceAsync(a, ct)).ToList();
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer refresh replaced this one.
+        }
+    }
 
-                await Dispatcher.InvokeAsync(() => { a.PresenceKind = kind; });
+    private async Task RefreshSingleAccountPresenceAsync(AccountRecord account, CancellationToken cancellationToken)
+    {
+        AccountPresenceKind kind;
+        if (string.IsNullOrEmpty(account.ProtectedCookieBase64))
+        {
+            kind = AccountPresenceKind.NoCookie;
+        }
+        else
+        {
+            var raw = CredentialProtector.UnprotectFromBase64(account.ProtectedCookieBase64);
+            var clean = RobloxSessionCookie.Sanitize(raw);
+            if (string.IsNullOrEmpty(clean))
+            {
+                kind = AccountPresenceKind.NoCookie;
+            }
+            else
+            {
+                try
+                {
+                    kind = await RobloxAccountPresenceService.QueryAsync(clean, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Line("PRESENCE", $"Could not refresh status for “{account.ListLabel}”: {ex.Message}");
+                    kind = AccountPresenceKind.InvalidCookie;
+                }
             }
         }
-        finally
+
+        if (!cancellationToken.IsCancellationRequested)
         {
-            try
-            {
-                await Dispatcher.InvokeAsync(() => { RefreshAccountsPresenceButton.IsEnabled = true; });
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _presenceRefreshGate, 0);
-            }
+            await Dispatcher.InvokeAsync(() => account.PresenceKind = kind);
         }
     }
 
