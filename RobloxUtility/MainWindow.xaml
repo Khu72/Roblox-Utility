@@ -47,9 +47,13 @@
           </Grid.RowDefinitions>
           <TextBlock Grid.Row="0" Text="Multi-Instance" Style="{StaticResource H1}" />
           <TextBlock Grid.Row="1" Margin="0,10,0,0" Style="{StaticResource Body}"
-                     Text="Roblox keeps a session-scoped named object (e.g. \Sessions\&lt;n&gt;\BaseNamedObjects\ROBLOX_singletonEvent) so only one client is allowed. This app finds that handle in running Roblox and closes it so you can open more than one. Run as Administrator if you get &quot;Access denied&quot; or handle-table errors." />
-          <Button Grid.Row="2" x:Name="EnableMultiInstanceButton" Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" MinWidth="260"
-                  Click="EnableMultiInstance_Click" Content="Enable multi-instance (all Roblox)" />
+                     Text="Roblox keeps a session-scoped named object (e.g. \Sessions\&lt;n&gt;\BaseNamedObjects\ROBLOX_singletonEvent) so only one client is allowed. This app finds that handle in running Roblox and closes it so you can open more than one. Run as Administrator if you get &quot;Access denied&quot; or handle-table errors. When you close a Roblox window, leftover tray processes are ended automatically." />
+          <StackPanel Grid.Row="2" Margin="0,18,0,0" Orientation="Horizontal">
+            <Button x:Name="EnableMultiInstanceButton" Style="{StaticResource PrimaryButton}" MinWidth="260"
+                    Click="EnableMultiInstance_Click" Content="Enable multi-instance (all Roblox)" />
+            <Button x:Name="ForceQuitRobloxButton" Margin="12,0,0,0" MinWidth="200"
+                    Click="ForceQuitRoblox_Click" Content="Force quit all Roblox" />
+          </StackPanel>
           <Border Grid.Row="3" Margin="0,16,0,0" VerticalAlignment="Stretch" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="14,12">
             <TextBlock x:Name="MultiInstanceStatus" TextWrapping="Wrap" Foreground="{StaticResource TextMuted}" FontSize="13" LineHeight="20" VerticalAlignment="Top" />
           </Border>
@@ -404,28 +408,88 @@
         <Grid Margin="0,4,0,0">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
           </Grid.RowDefinitions>
           <DockPanel Grid.Row="0" Margin="0,0,0,10" LastChildFill="False">
             <TextBlock DockPanel.Dock="Left" Text="Application Logs" Style="{StaticResource H1}" VerticalAlignment="Center" />
             <Button DockPanel.Dock="Right" x:Name="ConsoleClearButton" Content="Clear" MinWidth="72" Click="ConsoleClear_Click" VerticalAlignment="Center" />
           </DockPanel>
-          <Border Grid.Row="1" Background="#FF0D1117" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8">
-            <TextBox x:Name="AppConsoleBox"
-                     IsReadOnly="True"
-                     TextWrapping="NoWrap"
-                     VerticalScrollBarVisibility="Auto"
-                     HorizontalScrollBarVisibility="Auto"
-                     FontFamily="Cascadia Mono, Consolas"
-                     FontSize="13.5"
-                     Foreground="#FFF0F6FC"
-                     Background="Transparent"
-                     BorderThickness="0"
-                     CaretBrush="#FFF0F6FC"
-                     SelectionBrush="#FF2F81F7"
-                     SelectionOpacity="0.35"
-                     AcceptsReturn="True"
-                     TextOptions.TextFormattingMode="Display" />
+          <Border Grid.Row="1" Margin="0,0,0,10" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="20" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Grid.Column="0" VerticalAlignment="Center" Style="{StaticResource Caption}" Text="Open links in" />
+              <ComboBox Grid.Column="2"
+                        x:Name="ConsoleBrowserCombo"
+                        MinHeight="30"
+                        DisplayMemberPath="Label"
+                        SelectedValuePath="Value"
+                        SelectionChanged="ConsoleBrowserSetting_Changed" />
+              <CheckBox Grid.Column="4"
+                        x:Name="ConsolePrivateBrowsingCheck"
+                        Content="Open in private / incognito window"
+                        VerticalAlignment="Center"
+                        Checked="ConsoleBrowserSetting_Changed"
+                        Unchecked="ConsoleBrowserSetting_Changed" />
+            </Grid>
+          </Border>
+          <Border Grid.Row="2" Background="#FF0D1117" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8">
+            <RichTextBox x:Name="AppConsoleBox"
+                         IsReadOnly="True"
+                         IsDocumentEnabled="True"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Auto"
+                         SizeChanged="AppConsoleBox_SizeChanged"
+                         FontFamily="Cascadia Mono, Consolas"
+                         FontSize="13.5"
+                         Foreground="#FFF0F6FC"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         CaretBrush="#FFF0F6FC"
+                         SelectionBrush="#FF2F81F7"
+                         SelectionOpacity="0.35"
+                         TextOptions.TextFormattingMode="Display">
+              <FlowDocument PagePadding="0" TextAlignment="Left" />
+            </RichTextBox>
+          </Border>
+          <Border Grid.Row="3" Margin="0,8,0,0" Background="#FF0D1117" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="8,6">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Grid.Column="0"
+                         Text=">"
+                         Margin="0,0,8,0"
+                         VerticalAlignment="Center"
+                         FontFamily="Cascadia Mono, Consolas"
+                         FontSize="13.5"
+                         Foreground="#FF8B949E" />
+              <TextBox Grid.Column="1"
+                       x:Name="ConsoleInputBox"
+                       KeyDown="ConsoleInput_KeyDown"
+                       TextWrapping="NoWrap"
+                       FontFamily="Cascadia Mono, Consolas"
+                       FontSize="13.5"
+                       Foreground="#FFF0F6FC"
+                       Background="Transparent"
+                       BorderThickness="0"
+                       CaretBrush="#FFF0F6FC"
+                       SelectionBrush="#FF2F81F7"
+                       SelectionOpacity="0.35"
+                       TextOptions.TextFormattingMode="Display">
+                <TextBox.ToolTip>
+                  <ToolTip Content="Type a command and press Enter (e.g. /getuser Roblox or /getuser 1562160156)" />
+                </TextBox.ToolTip>
+              </TextBox>
+            </Grid>
           </Border>
         </Grid>
       </TabItem>

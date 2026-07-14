@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -18,12 +19,15 @@ namespace RobloxUtility;
 public partial class MainWindow
 {
     private const int ConsoleMaxChars = 500_000;
+    private static readonly SolidColorBrush ConsoleLinkBrush = new(System.Windows.Media.Color.FromRgb(0x58, 0xA6, 0xFF));
 
     private readonly AccountStore _store = new();
     private readonly PlaceStore _placeStore = new();
     private readonly MultiInstanceService _multi = new();
+    private readonly RobloxExitCleanupService _robloxExitCleanup = new();
     private readonly AutoClickerService _autoClicker;
     private readonly AutoClickerSettingsStore _autoStore = new();
+    private readonly BrowserSettingsStore _browserStore = new();
     private HwndSource? _hwndSource;
     private const int AutoHotkeyId = 0x4A11;
     private const int WmHotkey = 0x0312;
@@ -35,6 +39,7 @@ public partial class MainWindow
     private HotkeyBindingType _mouseBindingType = HotkeyBindingType.None;
     private Forms.NotifyIcon? _notifyIcon;
     private bool _suppressAutoPersist;
+    private bool _suppressBrowserPersist;
     private enum HotkeyBindingType
     {
         None = 0,
@@ -49,6 +54,7 @@ public partial class MainWindow
     private CancellationTokenSource? _presenceRefreshCts;
     private CancellationTokenSource? _friendsRefreshCts;
     private int _friendsAvatarGeneration;
+    private int _consoleCharCount;
     private readonly ObservableCollection<OnlineFriendRow> _onlineFriends = new();
 
     public MainWindow()
@@ -114,12 +120,24 @@ public partial class MainWindow
         }
         _suppressAutoPersist = false;
 
+        _suppressBrowserPersist = true;
+        ConsoleBrowserCombo.ItemsSource = BrowserSettings.BrowserChoices;
+        var savedBrowser = _browserStore.Load();
+        ConsoleBrowserCombo.SelectedValue = BrowserSettings.AllBrowsers.Contains(savedBrowser.Browser)
+            ? savedBrowser.Browser
+            : BrowserSettings.DefaultBrowser;
+        ConsolePrivateBrowsingCheck.IsChecked = savedBrowser.OpenInPrivate;
+        ApplyBrowserSettings(savedBrowser);
+        _suppressBrowserPersist = false;
+
         SetupHotkeyHook();
         RefreshAutoLabels();
         _autoClicker.SetRunning(true);
         PushAutoConfig();
 
         AppLog.UiLogLine += OnAppLogUiLine;
+        AppLog.UiLogLinkLine += OnAppLogUiLinkLine;
+        UpdateConsolePageWidth();
         AppLog.Info($"Loaded {_store.Accounts.Count} account(s), {_placeStore.Places.Count} saved place(s).");
         UpdateAddControls();
         _ = RefreshAllAccountsPresenceAsync();
@@ -421,6 +439,16 @@ public partial class MainWindow
         }
     }
 
+    private void AppConsoleBox_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateConsolePageWidth();
+
+    private void UpdateConsolePageWidth()
+    {
+        if (AppConsoleBox.ViewportWidth > 0)
+        {
+            AppConsoleBox.Document.PageWidth = AppConsoleBox.ViewportWidth;
+        }
+    }
+
     private void OnAppLogUiLine(string line)
     {
         if (!Dispatcher.CheckAccess())
@@ -429,18 +457,127 @@ public partial class MainWindow
             return;
         }
 
-        AppConsoleBox.AppendText(line + Environment.NewLine);
-        if (AppConsoleBox.Text.Length > ConsoleMaxChars)
+        AppendConsoleText(line);
+    }
+
+    private void OnAppLogUiLinkLine(string prefix, string url)
+    {
+        if (!Dispatcher.CheckAccess())
         {
-            var drop = AppConsoleBox.Text.Length - ConsoleMaxChars + 50_000;
-            AppConsoleBox.Text = AppConsoleBox.Text[drop..];
+            _ = Dispatcher.BeginInvoke(() => OnAppLogUiLinkLine(prefix, url));
+            return;
         }
 
-        AppConsoleBox.CaretIndex = AppConsoleBox.Text.Length;
+        AppendConsoleLink(prefix, url);
+    }
+
+    private void AppendConsoleText(string line)
+    {
+        var para = new Paragraph(new Run(line)) { Margin = new Thickness(0), LineHeight = 1.2 };
+        AppendConsoleBlock(para, line.Length + Environment.NewLine.Length);
+    }
+
+    private void AppendConsoleLink(string prefix, string url)
+    {
+        var para = new Paragraph { Margin = new Thickness(0), LineHeight = 1.2 };
+        para.Inlines.Add(new Run(prefix));
+
+        var link = new Hyperlink(new Run(url))
+        {
+            NavigateUri = new Uri(url, UriKind.Absolute),
+            Foreground = ConsoleLinkBrush,
+            TextDecorations = TextDecorations.Underline
+        };
+        link.Click += ConsoleLink_Click;
+        para.Inlines.Add(link);
+
+        AppendConsoleBlock(para, prefix.Length + url.Length + Environment.NewLine.Length);
+    }
+
+    private void AppendConsoleBlock(Block block, int charCount)
+    {
+        AppConsoleBox.Document.Blocks.Add(block);
+        _consoleCharCount += charCount;
+        TrimConsoleIfNeeded();
         AppConsoleBox.ScrollToEnd();
     }
 
-    private void ConsoleClear_Click(object sender, RoutedEventArgs e) => AppConsoleBox.Clear();
+    private void TrimConsoleIfNeeded()
+    {
+        while (_consoleCharCount > ConsoleMaxChars && AppConsoleBox.Document.Blocks.FirstBlock is { } first)
+        {
+            var removed = new TextRange(first.ContentStart, first.ContentEnd).Text;
+            _consoleCharCount -= removed.Length;
+            AppConsoleBox.Document.Blocks.Remove(first);
+        }
+    }
+
+    private void ConsoleLink_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Hyperlink link || link.NavigateUri is null)
+        {
+            return;
+        }
+
+        BrowserLaunchService.OpenUrl(link.NavigateUri.ToString());
+        e.Handled = true;
+    }
+
+    private void ConsoleClear_Click(object sender, RoutedEventArgs e)
+    {
+        AppConsoleBox.Document.Blocks.Clear();
+        _consoleCharCount = 0;
+    }
+
+    private void ConsoleBrowserSetting_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_suppressBrowserPersist)
+        {
+            return;
+        }
+
+        var cfg = ReadBrowserSettingsFromUi();
+        ApplyBrowserSettings(cfg);
+        _browserStore.Save(cfg);
+    }
+
+    private BrowserSettings ReadBrowserSettingsFromUi()
+    {
+        var browser = ConsoleBrowserCombo.SelectedValue as string ?? BrowserSettings.DefaultBrowser;
+        return new BrowserSettings
+        {
+            Browser = browser,
+            OpenInPrivate = ConsolePrivateBrowsingCheck.IsChecked == true
+        };
+    }
+
+    private static void ApplyBrowserSettings(BrowserSettings cfg) => BrowserLaunchService.Settings = cfg;
+
+    private async void ConsoleInput_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        var text = ConsoleInputBox.Text.Trim();
+        ConsoleInputBox.Clear();
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        AppLog.Line("CMD", $"> {text}");
+        try
+        {
+            await ConsoleCommandService.ExecuteAsync(text);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Err(ex.Message);
+        }
+    }
 
     private void Accounts_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
@@ -484,6 +621,8 @@ public partial class MainWindow
         _notifyIcon = null;
 
         AppLog.UiLogLine -= OnAppLogUiLine;
+        AppLog.UiLogLinkLine -= OnAppLogUiLinkLine;
+        _robloxExitCleanup.Dispose();
         _autoClicker.SetRunning(false);
         _autoClicker.Dispose();
         _store.Save();
@@ -591,6 +730,20 @@ public partial class MainWindow
         }
     }
 
+    private void ForceQuitRoblox_Click(object sender, RoutedEventArgs e)
+    {
+        var n = RobloxExitCleanupService.ForceQuitAll();
+        MultiInstanceStatus.Text = n > 0
+            ? $"Force-quit ended {n} Roblox-related process(es)."
+            : "No Roblox processes were running.";
+        MultiInstanceStatus.Foreground = n > 0
+            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(155, 199, 155))
+            : System.Windows.Media.Brushes.LightSalmon;
+        AppLog.Info(n > 0
+            ? $"Force-quit ended {n} Roblox-related process(es)."
+            : "Force-quit: nothing to end.");
+    }
+
     private void EnableMultiInstance_Click(object sender, RoutedEventArgs e)
     {
         AppLog.Info("Enabling multi-instance (closing ROBLOX_singletonEvent handles)…");
@@ -609,7 +762,7 @@ public partial class MainWindow
         {
             var suffix = r.Succeeded ? "OK" : $"failed ({r.Detail})";
             log.AppendLine($"- PID {r.ProcessId}: handle(s) removed {r.HandlesClosed}, result {suffix}.");
-            if (r.HandlesClosed > 0)
+            if (r.HandlesClosed > 0 || r.Detail.Contains("Already unlocked", StringComparison.OrdinalIgnoreCase))
             {
                 any = true;
             }
@@ -618,7 +771,7 @@ public partial class MainWindow
         }
 
         MultiInstanceStatus.Text = (any
-            ? "Singleton handle(s) closed. You can launch or join on another account.\n"
+            ? "Singleton handle(s) closed (or already unlocked). You can launch or join on another account.\n"
             : "No ROBLOX_singletonEvent handle was closed. Start Roblox first, or run the app as Administrator. Details:\n")
             + log;
         MultiInstanceStatus.Foreground = any
@@ -822,18 +975,13 @@ public partial class MainWindow
             return;
         }
 
-        if (_multi.CountRobloxInstances() > 0)
+        if (_multi.CountRobloxPlayerInstances() > 0)
         {
-            var m = _multi.EnableMultiInstance();
-            var n = 0;
-            foreach (var r in m)
-            {
-                n += r.HandlesClosed;
-            }
-
+            setStatus("Preparing multi-instance…");
+            var n = await _multi.EnsureUnlockedBeforeLaunchAsync();
             setStatus(n > 0
                 ? $"Multi-instance: closed {n} singleton handle(s). Requesting join…"
-                : "Multi-instance: no handle removed. Requesting join…");
+                : "Multi-instance ready. Requesting join…");
         }
         else
         {
@@ -842,7 +990,8 @@ public partial class MainWindow
 
         var cookie = CredentialProtector.UnprotectFromBase64(b64);
         AppLog.Line("LAUNCH", $"Join place {placeId} as '{a.DisplayName}'…");
-        var r2 = await RobloxLaunchService.LaunchWithCookieAsync(cookie ?? string.Empty, placeId);
+        var r2 = await RobloxLaunchService.LaunchWithCookieAsync(cookie ?? string.Empty, placeId, a.BrowserTrackerId);
+        ApplyLaunchSessionUpdates(a, r2);
         setStatus(r2.Message);
         if (r2.Ok)
         {
@@ -854,11 +1003,38 @@ public partial class MainWindow
         }
     }
 
+    private void ApplyLaunchSessionUpdates(AccountRecord account, LaunchResult result)
+    {
+        var changed = false;
+        if (result.BrowserTrackerId is long tracker && tracker > 0 && account.BrowserTrackerId != tracker)
+        {
+            account.BrowserTrackerId = tracker;
+            changed = true;
+        }
+
+        if (!string.IsNullOrEmpty(result.UpdatedCookie))
+        {
+            account.ProtectedCookieBase64 = CredentialProtector.ProtectToBase64(result.UpdatedCookie);
+            if (ReferenceEquals(AccountsList.SelectedItem, account))
+            {
+                AccCookie.Password = string.Empty;
+                AccCookieStatus.Text = "Roblox refreshed this account’s session cookie automatically.";
+            }
+
+            changed = true;
+        }
+
+        if (changed)
+        {
+            _store.Save();
+        }
+    }
+
     private async void ClientOnly_Click(object sender, RoutedEventArgs e)
     {
-        if (_multi.CountRobloxInstances() > 0)
+        if (_multi.CountRobloxPlayerInstances() > 0)
         {
-            _multi.EnableMultiInstance();
+            await _multi.EnsureUnlockedBeforeLaunchAsync();
         }
 
         if (AccountsList.SelectedItem is not AccountRecord a)
@@ -883,7 +1059,8 @@ public partial class MainWindow
 
         AppLog.Info("Starting Roblox for the selected account (session from cookie)…");
         var cookie = CredentialProtector.UnprotectFromBase64(b64);
-        var r = await RobloxLaunchService.StartRobloxClientWithCookieAsync(cookie ?? string.Empty);
+        var r = await RobloxLaunchService.StartRobloxClientWithCookieAsync(cookie ?? string.Empty, a.BrowserTrackerId);
+        ApplyLaunchSessionUpdates(a, r);
         AccountLaunchStatus.Text = r.Message;
         if (r.Ok)
         {
@@ -1039,9 +1216,9 @@ public partial class MainWindow
             return;
         }
 
-        if (_multi.CountRobloxInstances() > 0)
+        if (_multi.CountRobloxPlayerInstances() > 0)
         {
-            _multi.EnableMultiInstance();
+            await _multi.EnsureUnlockedBeforeLaunchAsync();
         }
 
         var b64 = acc.ProtectedCookieBase64;
@@ -1054,7 +1231,8 @@ public partial class MainWindow
 
         var cookie = CredentialProtector.UnprotectFromBase64(b64);
         AppLog.Line("LAUNCH", $"Places tab: join {placeId} as '{acc.DisplayName}'…");
-        var r = await RobloxLaunchService.LaunchWithCookieAsync(cookie ?? string.Empty, placeId);
+        var r = await RobloxLaunchService.LaunchWithCookieAsync(cookie ?? string.Empty, placeId, acc.BrowserTrackerId);
+        ApplyLaunchSessionUpdates(acc, r);
         PlacesTabStatus.Text = r.Message;
         if (r.Ok)
         {

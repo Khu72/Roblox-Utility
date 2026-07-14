@@ -11,13 +11,18 @@ namespace RobloxUtility.Services;
 public sealed class MultiInstanceService
 {
     public const string RobloxProcessName = "RobloxPlayerBeta";
-    private static readonly string[] RobloxProcessNames =
+
+    /// <summary>Only the game client holds the singleton we need to close. Launcher stubs are ignored.</summary>
+    private static readonly string[] SingletonTargetProcessNames = { RobloxProcessName };
+
+    private static readonly string[] CountProcessNames =
     {
-        "RobloxPlayerBeta",
+        RobloxProcessName,
         "RobloxPlayerLauncher",
         "WinRoblox",
         "Roblox",
     };
+
     private const uint ProcessDupHandle = 0x0040;
     /// <summary>Win10+; often allowed when full <see cref="ProcessQueryInformation"/> is denied.</summary>
     private const uint ProcessQueryLimitedInformation = 0x1000;
@@ -26,12 +31,20 @@ public sealed class MultiInstanceService
     private const int StatusInfoLengthMismatch = unchecked((int)0xC0000004);
     private const int StatusSuccess = 0;
 
+    /// <summary>PIDs we already unlocked this session — re-scanning every launch destabilizes clients.</summary>
+    private readonly HashSet<int> _unlockedPids = new();
+    private readonly object _unlockGate = new();
+
     public IReadOnlyList<MultiInstanceResult> EnableMultiInstance()
     {
         _ = NativeMethods.TryEnableDebugPrivilege();
+        PruneUnlockedPids();
+
         var results = new List<MultiInstanceResult>();
         var seen = new HashSet<int>();
-        foreach (var name in RobloxProcessNames)
+        ushort? eventTypeIndex = TryResolveEventObjectTypeIndex();
+
+        foreach (var name in SingletonTargetProcessNames)
         {
             foreach (var p in Process.GetProcessesByName(name))
             {
@@ -43,8 +56,24 @@ public sealed class MultiInstanceService
 
                 using (p)
                 {
-                    int closed;
-                    var ok = TryCloseSingletonForProcess(p, out closed, out var detail);
+                    lock (_unlockGate)
+                    {
+                        if (_unlockedPids.Contains(p.Id))
+                        {
+                            results.Add(new MultiInstanceResult(p.Id, true, 0, "Already unlocked this session."));
+                            continue;
+                        }
+                    }
+
+                    var ok = TryCloseSingletonForProcess(p, eventTypeIndex, out var closed, out var detail);
+                    if (ok && closed > 0)
+                    {
+                        lock (_unlockGate)
+                        {
+                            _unlockedPids.Add(p.Id);
+                        }
+                    }
+
                     results.Add(new MultiInstanceResult(p.Id, ok, closed, detail));
                 }
             }
@@ -53,10 +82,43 @@ public sealed class MultiInstanceService
         return results;
     }
 
+    /// <summary>
+    /// Unlocks any new RobloxPlayerBeta instances before a join. Retries briefly because the
+    /// singleton handle can appear a moment after the process starts. Skips PIDs already unlocked
+    /// this session so we do not re-scan every handle on every launch (that can destabilize clients).
+    /// </summary>
+    public async Task<int> EnsureUnlockedBeforeLaunchAsync(CancellationToken cancellationToken = default)
+    {
+        var totalClosed = 0;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (CountRobloxPlayerInstances() == 0)
+            {
+                return totalClosed;
+            }
+
+            var results = EnableMultiInstance();
+            foreach (var r in results)
+            {
+                totalClosed += r.HandlesClosed;
+            }
+
+            if (results.Count == 0 || results.All(r => r.Succeeded))
+            {
+                return totalClosed;
+            }
+
+            await Task.Delay(350, cancellationToken).ConfigureAwait(false);
+        }
+
+        return totalClosed;
+    }
+
     public int CountRobloxInstances()
     {
         var seen = new HashSet<int>();
-        foreach (var name in RobloxProcessNames)
+        foreach (var name in CountProcessNames)
         {
             foreach (var p in Process.GetProcessesByName(name))
             {
@@ -68,7 +130,43 @@ public sealed class MultiInstanceService
         return seen.Count;
     }
 
-    private static bool TryCloseSingletonForProcess(Process process, out int handlesClosed, out string detail)
+    public int CountRobloxPlayerInstances()
+    {
+        var seen = new HashSet<int>();
+        foreach (var p in Process.GetProcessesByName(RobloxProcessName))
+        {
+            seen.Add(p.Id);
+            p.Dispose();
+        }
+
+        return seen.Count;
+    }
+
+    private void PruneUnlockedPids()
+    {
+        lock (_unlockGate)
+        {
+            if (_unlockedPids.Count == 0)
+            {
+                return;
+            }
+
+            var live = new HashSet<int>();
+            foreach (var p in Process.GetProcessesByName(RobloxProcessName))
+            {
+                live.Add(p.Id);
+                p.Dispose();
+            }
+
+            _unlockedPids.RemoveWhere(id => !live.Contains(id));
+        }
+    }
+
+    private static bool TryCloseSingletonForProcess(
+        Process process,
+        ushort? eventTypeIndex,
+        out int handlesClosed,
+        out string detail)
     {
         handlesClosed = 0;
         detail = "";
@@ -119,7 +217,7 @@ public sealed class MultiInstanceService
             {
                 using (new LocalMemory(extTable))
                 {
-                    TryCloseUsingExtendedTable(hProcess, process.Id, extTable, out var closedEx);
+                    TryCloseUsingExtendedTable(hProcess, process.Id, extTable, eventTypeIndex, out var closedEx);
                     handlesClosed += closedEx;
                 }
             }
@@ -135,7 +233,7 @@ public sealed class MultiInstanceService
                 {
                     using (new LocalMemory(legacyPtr))
                     {
-                        handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, legacyPtr);
+                        handlesClosed += TryCloseUsingLegacyTable(hProcess, process.Id, legacyPtr, eventTypeIndex);
                     }
                 }
             }
@@ -178,7 +276,12 @@ public sealed class MultiInstanceService
         return handlesClosed > 0;
     }
 
-    private static bool TryCloseUsingExtendedTable(IntPtr hProcess, int pid, IntPtr tablePtr, out int handlesClosed)
+    private static bool TryCloseUsingExtendedTable(
+        IntPtr hProcess,
+        int pid,
+        IntPtr tablePtr,
+        ushort? eventTypeIndex,
+        out int handlesClosed)
     {
         handlesClosed = 0;
         try
@@ -208,38 +311,16 @@ public sealed class MultiInstanceService
                     continue;
                 }
 
-                if (!NativeMethods.DuplicateHandle(
-                        hProcess,
-                        h.HandleValue,
-                        NativeMethods.GetCurrentProcess(),
-                        out var dup,
-                        0,
-                        false,
-                        0))
+                if (eventTypeIndex is ushort ev && h.ObjectTypeIndex != ev)
                 {
                     continue;
                 }
 
-                if (!TryGetName(dup, out var name)
-                    || !name.Contains("singletonEvent", StringComparison.OrdinalIgnoreCase))
+                if (TryCloseSingletonHandle(hProcess, h.HandleValue))
                 {
-                    NativeMethods.CloseHandle(dup);
-                    continue;
-                }
-
-                NativeMethods.CloseHandle(dup);
-
-                if (NativeMethods.DuplicateHandle(
-                        hProcess,
-                        h.HandleValue,
-                        NativeMethods.GetCurrentProcess(),
-                        out var dummy,
-                        0,
-                        false,
-                        NativeMethods.DuplicateCloseSource) && dummy != IntPtr.Zero)
-                {
-                    NativeMethods.CloseHandle(dummy);
                     handlesClosed++;
+                    // One unlock per process is enough; keep scanning less invasive.
+                    break;
                 }
             }
 
@@ -252,7 +333,11 @@ public sealed class MultiInstanceService
         }
     }
 
-    private static int TryCloseUsingLegacyTable(IntPtr hProcess, int pid, IntPtr tablePtr)
+    private static int TryCloseUsingLegacyTable(
+        IntPtr hProcess,
+        int pid,
+        IntPtr tablePtr,
+        ushort? eventTypeIndex)
     {
         if (pid > 0xFFFF)
         {
@@ -282,43 +367,137 @@ public sealed class MultiInstanceService
                 continue;
             }
 
+            if (eventTypeIndex is ushort ev && h.ObjectTypeIndex != ev)
+            {
+                continue;
+            }
+
             var handleValue = new IntPtr(h.HandleValue);
-            if (!NativeMethods.DuplicateHandle(
-                    hProcess,
-                    handleValue,
-                    NativeMethods.GetCurrentProcess(),
-                    out var dup,
-                    0,
-                    false,
-                    0))
+            if (TryCloseSingletonHandle(hProcess, handleValue))
             {
-                continue;
-            }
-
-            if (!TryGetName(dup, out var name)
-                || !name.Contains("singletonEvent", StringComparison.OrdinalIgnoreCase))
-            {
-                NativeMethods.CloseHandle(dup);
-                continue;
-            }
-
-            NativeMethods.CloseHandle(dup);
-
-            if (NativeMethods.DuplicateHandle(
-                    hProcess,
-                    handleValue,
-                    NativeMethods.GetCurrentProcess(),
-                    out var dummy,
-                    0,
-                    false,
-                    NativeMethods.DuplicateCloseSource) && dummy != IntPtr.Zero)
-            {
-                NativeMethods.CloseHandle(dummy);
                 handlesClosed++;
+                break;
             }
         }
 
         return handlesClosed;
+    }
+
+    /// <summary>
+    /// Duplicate → verify ROBLOX_singletonEvent → re-verify → close source.
+    /// Re-verify shrinks the race where the handle value is reused for something else.
+    /// </summary>
+    private static bool TryCloseSingletonHandle(IntPtr hProcess, IntPtr handleValue)
+    {
+        if (!NativeMethods.DuplicateHandle(
+                hProcess,
+                handleValue,
+                NativeMethods.GetCurrentProcess(),
+                out var dup,
+                0,
+                false,
+                0))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryGetName(dup, out var name) || !IsRobloxSingletonEventName(name))
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            NativeMethods.CloseHandle(dup);
+        }
+
+        // Re-check immediately before closing the source handle.
+        if (!NativeMethods.DuplicateHandle(
+                hProcess,
+                handleValue,
+                NativeMethods.GetCurrentProcess(),
+                out var dup2,
+                0,
+                false,
+                0))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryGetName(dup2, out var name2) || !IsRobloxSingletonEventName(name2))
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            NativeMethods.CloseHandle(dup2);
+        }
+
+        if (NativeMethods.DuplicateHandle(
+                hProcess,
+                handleValue,
+                NativeMethods.GetCurrentProcess(),
+                out var dummy,
+                0,
+                false,
+                NativeMethods.DuplicateCloseSource) && dummy != IntPtr.Zero)
+        {
+            NativeMethods.CloseHandle(dummy);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsRobloxSingletonEventName(string name) =>
+        name.Contains("ROBLOX_singletonEvent", StringComparison.OrdinalIgnoreCase)
+        || name.EndsWith("singletonEvent", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Resolve the current Windows "Event" object type index so we only DuplicateHandle
+    /// Event objects in Roblox — duplicating every handle on each launch can destabilize clients
+    /// and they may exit a while later.
+    /// </summary>
+    private static ushort? TryResolveEventObjectTypeIndex()
+    {
+        using var localEvent = new EventWaitHandle(false, EventResetMode.ManualReset);
+        if (!localEvent.SafeWaitHandle.IsInvalid)
+        {
+            var ourPid = Environment.ProcessId;
+            var handleValue = localEvent.SafeWaitHandle.DangerousGetHandle();
+            if (QuerySystemHandleTable(
+                    NativeMethods.SystemExtendedHandleInformation,
+                    out var table,
+                    out _,
+                    out _) && table != IntPtr.Zero)
+            {
+                using (new LocalMemory(table))
+                {
+                    var count = Marshal.ReadIntPtr(table).ToInt64();
+                    if (count > 0 && count <= 16_000_000)
+                    {
+                        var pBase = IntPtr.Add(table, IntPtr.Size * 2);
+                        var size = Marshal.SizeOf<SystemHandleEx>();
+                        for (var i = 0; i < (int)count; i++)
+                        {
+                            var h = Marshal.PtrToStructure<SystemHandleEx>(pBase);
+                            pBase = IntPtr.Add(pBase, size);
+                            if (h.UniqueProcessId.ToInt64() == ourPid && h.HandleValue == handleValue)
+                            {
+                                return h.ObjectTypeIndex;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     private static bool TryGetName(IntPtr duplicatedHandle, out string name)

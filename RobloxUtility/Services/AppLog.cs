@@ -9,6 +9,9 @@ public static class AppLog
     /// <summary>Raised for every log line (mirrors console text). Handlers may be off the UI thread.</summary>
     public static event Action<string>? UiLogLine;
 
+    /// <summary>Raised for log lines that include a clickable URL. Handlers may be off the UI thread.</summary>
+    public static event Action<string, string>? UiLogLinkLine;
+
     private static readonly object Gate = new();
     private static bool _initialized;
 
@@ -96,6 +99,28 @@ public static class AppLog
     public static void Warn(string message) => Line("WARN", message);
 
     public static void Err(string message) => Line("ERROR", message);
+
+    public static void Link(string category, string url)
+    {
+        var ts = DateTime.Now.ToString("HH:mm:ss");
+        var prefix = $"[{ts}] {category,-10} ";
+        UiLogLinkLine?.Invoke(prefix, url);
+
+        lock (Gate)
+        {
+            if (!_initialized)
+            {
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.Write($"[{ts}] ");
+            Console.ForegroundColor = CategoryColor(category);
+            Console.Write($"{category,-10} ");
+            Console.ResetColor();
+            Console.WriteLine(url);
+        }
+    }
 
     private static ConsoleColor CategoryColor(string c) => c.ToUpperInvariant() switch
     {

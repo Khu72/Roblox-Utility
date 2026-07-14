@@ -38,6 +38,12 @@ public sealed class AccountRecord : INotifyPropertyChanged
 
     public string? ProtectedCookieBase64 { get; set; }
 
+    /// <summary>
+    /// Stable browserTrackerId for this account (Roblox web uses a persistent tracker).
+    /// Randomizing it on every launch looks more like automation and can trigger challenges.
+    /// </summary>
+    public long BrowserTrackerId { get; set; }
+
     private AccountPresenceKind _presenceKind = AccountPresenceKind.Unknown;
 
     [JsonIgnore]

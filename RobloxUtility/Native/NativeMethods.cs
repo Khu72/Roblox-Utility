@@ -133,6 +133,20 @@ internal static class NativeMethods
     /// <summary>2 = root top-level window (foreground may be a child control).</summary>
     public const uint GaRoot = 2;
 
+    /// <summary>GW_OWNER — owned windows are skipped when looking for a real top-level frame.</summary>
+    public const uint GwOwner = 4;
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
 

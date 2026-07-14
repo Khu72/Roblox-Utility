@@ -21,6 +21,7 @@ public sealed class RobloxLaunchService
     public static async Task<LaunchResult> LaunchWithCookieAsync(
         string robloxSecurityCookie,
         long placeId,
+        long browserTrackerId = 0,
         CancellationToken cancellationToken = default)
     {
         var clean = RobloxSessionCookie.Sanitize(robloxSecurityCookie);
@@ -34,41 +35,70 @@ public sealed class RobloxLaunchService
             return new LaunchResult(false, "Place ID must be greater than 0.");
         }
 
+        var tracker = browserTrackerId > 0
+            ? browserTrackerId
+            : Random.Shared.NextInt64(100_000_000L, int.MaxValue);
+
         using var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            UseCookies = false
         };
         using var client = new HttpClient(handler) { DefaultRequestVersion = HttpVersion.Version20, Timeout = TimeSpan.FromSeconds(40) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd(WebUserAgent);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+
+        var sessionCookie = clean;
 
         // 1) Try JSON join from gamejoin (works with current CSRF + session).
-        var joinGame = await TryPostJoinGameAsync(client, clean, placeId, cancellationToken);
-        if (joinGame is { } j && j.Ok)
+        var joinGame = await TryPostJoinGameAsync(client, () => sessionCookie, c => sessionCookie = c, placeId, tracker, cancellationToken);
+        if (joinGame is { } j)
         {
-            return j;
+            return WithSessionUpdates(j, sessionCookie, clean, tracker);
         }
 
         // 2) Try classic GET on assetgame (lowercase path; www/game often 404s).
-        var fromAshx = await TryGetPlaceLauncherJsonAsync(client, clean, placeId, cancellationToken);
-        if (fromAshx is { } a && a.Ok)
+        var fromAshx = await TryGetPlaceLauncherJsonAsync(client, () => sessionCookie, c => sessionCookie = c, placeId, cancellationToken);
+        if (fromAshx is { } a)
         {
-            return a;
+            return WithSessionUpdates(a, sessionCookie, clean, tracker);
         }
 
         // 3) Auth-ticket + roblox-player: (same flow as the website Play button in external tools).
-        var (ok, err, tix) = await RobloxSessionCookie.GetAuthenticationTicketAsync(clean, client, cancellationToken);
-        if (!ok || tix is null)
+        var (ok, err, tix, challenge) = await RobloxSessionCookie.GetAuthenticationTicketAsync(
+            client,
+            () => sessionCookie,
+            c => sessionCookie = c,
+            cancellationToken);
+        if (challenge)
         {
-            return new LaunchResult(false, err ?? "Could not get an authentication ticket. Try again or paste a new .ROBLOSECURITY from an active session.");
+            return WithSessionUpdates(
+                new LaunchResult(
+                    false,
+                    "Roblox asked for bot verification on this account. Open roblox.com in your browser while logged into this account, complete the check, copy a fresh .ROBLOSECURITY, then Save and try again."),
+                sessionCookie,
+                clean,
+                tracker);
         }
 
-        return StartRobloxPlayerPlayUri(tix, placeId);
+        if (!ok || tix is null)
+        {
+            return WithSessionUpdates(
+                new LaunchResult(false, err ?? "Could not get an authentication ticket. Try again or paste a new .ROBLOSECURITY from an active session."),
+                sessionCookie,
+                clean,
+                tracker);
+        }
+
+        return WithSessionUpdates(StartRobloxPlayerPlayUri(tix, placeId, tracker), sessionCookie, clean, tracker);
     }
 
     /// <summary>Opens the installed client with the same session (auth ticket) — no place join. Falls back to plain Roblox if ticket fails.</summary>
     public static async Task<LaunchResult> StartRobloxClientWithCookieAsync(
         string robloxSecurityCookie,
+        long browserTrackerId = 0,
         CancellationToken cancellationToken = default)
     {
         var clean = RobloxSessionCookie.Sanitize(robloxSecurityCookie);
@@ -77,15 +107,37 @@ public sealed class RobloxLaunchService
             return new LaunchResult(false, "Set and save a .ROBLOSECURITY for this account first, then use Start client only again.");
         }
 
+        var tracker = browserTrackerId > 0
+            ? browserTrackerId
+            : Random.Shared.NextInt64(100_000_000L, int.MaxValue);
+
         using var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            UseCookies = false
         };
         using var client = new HttpClient(handler) { DefaultRequestVersion = HttpVersion.Version20, Timeout = TimeSpan.FromSeconds(40) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd(WebUserAgent);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
 
-        var (ok, err, tix) = await RobloxSessionCookie.GetAuthenticationTicketAsync(clean, client, cancellationToken);
+        var sessionCookie = clean;
+        var (ok, err, tix, challenge) = await RobloxSessionCookie.GetAuthenticationTicketAsync(
+            client,
+            () => sessionCookie,
+            c => sessionCookie = c,
+            cancellationToken);
+        if (challenge)
+        {
+            return WithSessionUpdates(
+                new LaunchResult(
+                    false,
+                    "Roblox asked for bot verification on this account. Complete it on roblox.com in your browser, then paste a fresh .ROBLOSECURITY and Save."),
+                sessionCookie,
+                clean,
+                tracker);
+        }
+
         if (ok && tix is not null)
         {
             var u = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -93,11 +145,19 @@ public sealed class RobloxLaunchService
             var appUri = $"roblox-player:1+launchmode:app+gameinfo:{tix}+launchtime:{u}+robloxLocale:en_us+gameLocale:en_us+channel:";
             if (StartProtocolUri(appUri).Ok)
             {
-                return new LaunchResult(true, "Started the Roblox client for this account (session from saved cookie).");
+                return WithSessionUpdates(
+                    new LaunchResult(true, "Started the Roblox client for this account (session from saved cookie)."),
+                    sessionCookie,
+                    clean,
+                    tracker);
             }
         }
+        else if (!string.IsNullOrEmpty(err))
+        {
+            AppLog.Warn(err);
+        }
 
-        return StartRobloxClientOnly();
+        return WithSessionUpdates(StartRobloxClientOnly(), sessionCookie, clean, tracker);
     }
 
     public static LaunchResult StartRobloxClientOnly()
@@ -111,26 +171,96 @@ public sealed class RobloxLaunchService
         return StartProcessPath(path, string.Empty);
     }
 
-    private static async Task<LaunchResult?> TryPostJoinGameAsync(HttpClient client, string cleanCookie, long placeId, CancellationToken ct)
+    private static LaunchResult WithSessionUpdates(
+        LaunchResult result,
+        string currentCookie,
+        string originalCookie,
+        long tracker)
     {
-        var tracker = Random.Shared.Next(100_000_000, int.MaxValue);
+        string? rotated = null;
+        if (!string.IsNullOrEmpty(currentCookie)
+            && !string.Equals(currentCookie, originalCookie, StringComparison.Ordinal))
+        {
+            rotated = currentCookie;
+            AppLog.Line("AUTH", "Roblox rotated .ROBLOSECURITY — saved the new cookie for this account.");
+        }
+
+        return result with
+        {
+            UpdatedCookie = rotated,
+            BrowserTrackerId = tracker
+        };
+    }
+
+    private static void ApplySetCookieUpdates(HttpResponseMessage response, Action<string> setCookie)
+    {
+        if (!response.Headers.TryGetValues("Set-Cookie", out var values)
+            && !(response.Content?.Headers.TryGetValues("Set-Cookie", out values) ?? false))
+        {
+            return;
+        }
+
+        foreach (var raw in values)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            // ".ROBLOSECURITY=VALUE; path=/; ..."
+            const string prefix = ".ROBLOSECURITY=";
+            var idx = raw.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                continue;
+            }
+
+            var start = idx + prefix.Length;
+            var end = raw.IndexOf(';', start);
+            var value = end > start ? raw[start..end] : raw[start..];
+            value = RobloxSessionCookie.Sanitize(Uri.UnescapeDataString(value.Trim()));
+            if (!string.IsNullOrEmpty(value))
+            {
+                setCookie(value);
+            }
+        }
+    }
+
+    private static async Task<LaunchResult?> TryPostJoinGameAsync(
+        HttpClient client,
+        Func<string> getCookie,
+        Action<string> setCookie,
+        long placeId,
+        long tracker,
+        CancellationToken ct)
+    {
+        var joinAttemptId = Guid.NewGuid().ToString();
         for (int attempt = 0; attempt < 4; attempt++)
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, "https://gamejoin.roblox.com/v1/join-game");
-            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={cleanCookie}");
+            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={getCookie()}");
             req.Headers.Add("Origin", "https://www.roblox.com");
             req.Headers.Add("Referer", $"https://www.roblox.com/games/{placeId}/");
             var p = placeId.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var tr = tracker.ToString(System.Globalization.CultureInfo.InvariantCulture);
             req.Content = new StringContent(
-                $"{{\"placeId\":{p},\"isPlayTogetherGame\":false,\"isTeleport\":false,\"browserTrackerId\":{tr},\"gameJoinAttemptId\":\"00000000-0000-0000-0000-000000000000\"}}",
+                $"{{\"placeId\":{p},\"isPlayTogetherGame\":false,\"isTeleport\":false,\"browserTrackerId\":{tr},\"gameJoinAttemptId\":\"{joinAttemptId}\"}}",
                 Encoding.UTF8,
                 "application/json");
             var r = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct);
+            ApplySetCookieUpdates(r, setCookie);
             if (r.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
                 && r.Headers.TryGetValues("x-csrf-token", out var csf))
             {
                 var token = csf.FirstOrDefault();
+                var bodyPeek = await r.Content.ReadAsStringAsync(ct);
+                if (LooksLikeChallenge(r, bodyPeek))
+                {
+                    return new LaunchResult(
+                        false,
+                        "Roblox asked for bot verification before joining. Open this experience on roblox.com in your browser, complete the check, then copy a fresh .ROBLOSECURITY and Save.");
+                }
+
                 if (!string.IsNullOrEmpty(token))
                 {
                     if (client.DefaultRequestHeaders.Contains("X-CSRF-TOKEN"))
@@ -144,12 +274,19 @@ public sealed class RobloxLaunchService
                 continue;
             }
 
+            var body = await r.Content.ReadAsStringAsync(ct);
+            if (LooksLikeChallenge(r, body))
+            {
+                return new LaunchResult(
+                    false,
+                    "Roblox asked for bot verification before joining. Open this experience on roblox.com in your browser, complete the check, then copy a fresh .ROBLOSECURITY and Save.");
+            }
+
             if (!r.IsSuccessStatusCode)
             {
                 return null;
             }
 
-            var body = await r.Content.ReadAsStringAsync(ct);
             if (string.IsNullOrEmpty(body))
             {
                 return null;
@@ -164,7 +301,12 @@ public sealed class RobloxLaunchService
         return null;
     }
 
-    private static async Task<LaunchResult?> TryGetPlaceLauncherJsonAsync(HttpClient client, string cleanCookie, long placeId, CancellationToken ct)
+    private static async Task<LaunchResult?> TryGetPlaceLauncherJsonAsync(
+        HttpClient client,
+        Func<string> getCookie,
+        Action<string> setCookie,
+        long placeId,
+        CancellationToken ct)
     {
         // Lowercase "placelauncher" matches rbxlaunch; host assetgame serves the launcher.
         var url = $"https://assetgame.roblox.com/game/placelauncher.ashx?request=RequestGame&placeId={placeId.ToString(System.Globalization.CultureInfo.InvariantCulture)}&isPlayTogetherGame=false&gender=";
@@ -174,13 +316,22 @@ public sealed class RobloxLaunchService
             req.Headers.Add("Accept", "application/json");
             req.Headers.Add("Origin", "https://www.roblox.com");
             req.Headers.Add("Referer", $"https://www.roblox.com/games/{placeId}/");
-            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={cleanCookie}");
+            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={getCookie()}");
 
             var r = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct);
+            ApplySetCookieUpdates(r, setCookie);
             if (r.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
                 && r.Headers.TryGetValues("x-csrf-token", out var csf))
             {
                 var token = csf.FirstOrDefault();
+                var bodyPeek = await r.Content.ReadAsStringAsync(ct);
+                if (LooksLikeChallenge(r, bodyPeek))
+                {
+                    return new LaunchResult(
+                        false,
+                        "Roblox asked for bot verification before joining. Complete it on roblox.com in your browser, then paste a fresh .ROBLOSECURITY and Save.");
+                }
+
                 if (!string.IsNullOrEmpty(token))
                 {
                     if (client.DefaultRequestHeaders.Contains("X-CSRF-TOKEN"))
@@ -194,12 +345,19 @@ public sealed class RobloxLaunchService
                 continue;
             }
 
+            var body = await r.Content.ReadAsStringAsync(ct);
+            if (LooksLikeChallenge(r, body))
+            {
+                return new LaunchResult(
+                    false,
+                    "Roblox asked for bot verification before joining. Complete it on roblox.com in your browser, then paste a fresh .ROBLOSECURITY and Save.");
+            }
+
             if (!r.IsSuccessStatusCode)
             {
                 return null;
             }
 
-            var body = await r.Content.ReadAsStringAsync(ct);
             if (string.IsNullOrEmpty(body))
             {
                 return null;
@@ -214,22 +372,43 @@ public sealed class RobloxLaunchService
         return null;
     }
 
-    private static LaunchResult StartRobloxPlayerPlayUri(string authTicket, long placeId)
+    private static bool LooksLikeChallenge(HttpResponseMessage response, string? body)
+    {
+        foreach (var header in response.Headers)
+        {
+            if (header.Key.Contains("challenge", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        if (string.IsNullOrEmpty(body))
+        {
+            return false;
+        }
+
+        return body.Contains("Challenge is required", StringComparison.OrdinalIgnoreCase)
+               || body.Contains("\"challengeType\"", StringComparison.OrdinalIgnoreCase)
+               || body.Contains("rblx-challenge", StringComparison.OrdinalIgnoreCase)
+               || body.Contains("Verifying you", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static LaunchResult StartRobloxPlayerPlayUri(string authTicket, long placeId, long tracker)
     {
         // Matches roblox-cmd-launcher / community format: gameinfo (ticket) + encoded placelauncherurl + +browsertrackerid+locales+channel
-        var tracker = Random.Shared.Next(100_000_000, int.MaxValue);
         var joinId = Guid.NewGuid().ToString("N");
         var t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var tr = tracker.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         var plPart =
             "https%3A%2F%2Fassetgame.roblox.com%2Fgame%2FPlaceLauncher.ashx%3F" +
             "request%3DRequestGame%26" +
-            $"browserTrackerId%3D{tracker.ToString(System.Globalization.CultureInfo.InvariantCulture)}%26" +
+            $"browserTrackerId%3D{tr}%26" +
             $"placeId%3D{placeId.ToString(System.Globalization.CultureInfo.InvariantCulture)}%26" +
             "isPlayTogetherGame%3Dfalse%26" +
             $"joinAttemptId%3D{joinId}%26" +
             "joinAttemptOrigin%3DPlayButton" +
-            $"+browsertrackerid:{tracker}" +
+            $"+browsertrackerid:{tr}" +
             "+robloxLocale:en_us+gameLocale:en_us+channel:";
 
         // gameinfo: ticket must not be URL-encoded; protocol uses + as delimiter; tickets are typically safe.
@@ -353,24 +532,33 @@ public static class RobloxSessionCookie
         return s.Trim();
     }
 
-    public static async Task<(bool Ok, string? UserMessage, string? AuthTicket)> GetAuthenticationTicketAsync(
-        string cleanCookie,
+    public static async Task<(bool Ok, string? UserMessage, string? AuthTicket, bool ChallengeRequired)> GetAuthenticationTicketAsync(
         HttpClient client,
+        Func<string> getCookie,
+        Action<string> setCookie,
         CancellationToken ct)
     {
         for (int attempt = 0; attempt < 6; attempt++)
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, "https://auth.roblox.com/v1/authentication-ticket");
-            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={cleanCookie}");
+            req.Headers.TryAddWithoutValidation("Cookie", $".ROBLOSECURITY={getCookie()}");
             req.Headers.Add("Origin", "https://www.roblox.com");
             req.Headers.Add("Referer", "https://www.roblox.com/");
             req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
 
             var r = await client.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct);
+            RobloxLaunchServiceApplySetCookie(r, setCookie);
+
             if (r.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
                 && r.Headers.TryGetValues("x-csrf-token", out var toks))
             {
                 var t = toks.FirstOrDefault();
+                var peek = await r.Content.ReadAsStringAsync(ct);
+                if (LooksLikeChallengeBody(peek) || HasChallengeHeader(r))
+                {
+                    return (false, "Roblox asked for bot verification.", null, true);
+                }
+
                 if (!string.IsNullOrEmpty(t))
                 {
                     if (client.DefaultRequestHeaders.Contains("X-CSRF-TOKEN"))
@@ -384,9 +572,15 @@ public static class RobloxSessionCookie
                 continue;
             }
 
+            var body = await r.Content.ReadAsStringAsync(ct);
+            if (LooksLikeChallengeBody(body) || HasChallengeHeader(r))
+            {
+                return (false, "Roblox asked for bot verification.", null, true);
+            }
+
             if (!r.IsSuccessStatusCode)
             {
-                return (false, $"Authentication service returned {(int)r.StatusCode}. Copy a fresh .ROBLOSECURITY from a browser where you are logged in.", null);
+                return (false, $"Authentication service returned {(int)r.StatusCode}. Copy a fresh .ROBLOSECURITY from a browser where you are logged in.", null, false);
             }
 
             foreach (var h in r.Headers)
@@ -395,21 +589,82 @@ public static class RobloxSessionCookie
                     && h.Value.FirstOrDefault() is { } hv
                     && !string.IsNullOrEmpty(hv))
                 {
-                    return (true, null, hv);
+                    return (true, null, hv, false);
                 }
             }
 
-            var body = await r.Content.ReadAsStringAsync(ct);
             if (TryGetTicketFromJson(body, out var fromJson) && fromJson is not null)
             {
-                return (true, null, fromJson);
+                return (true, null, fromJson, false);
             }
 
-            return (false, "Roblox returned OK but no authentication ticket. Get a new .ROBLOSECURITY and try again.", null);
+            return (false, "Roblox returned OK but no authentication ticket. Get a new .ROBLOSECURITY and try again.", null, false);
         }
 
-        return (false, "Could not get a security token (CSRF). Try a new .ROBLOSECURITY from a browser where you are logged in.", null);
+        return (false, "Could not get a security token (CSRF). Try a new .ROBLOSECURITY from a browser where you are logged in.", null, false);
     }
+
+    // Shared with RobloxLaunchService — keep Set-Cookie handling in one place via duplicate small helper to avoid circular visibility issues.
+    private static void RobloxLaunchServiceApplySetCookie(HttpResponseMessage response, Action<string> setCookie)
+    {
+        IEnumerable<string>? values = null;
+        if (response.Headers.TryGetValues("Set-Cookie", out var headerValues))
+        {
+            values = headerValues;
+        }
+        else if (response.Content?.Headers.TryGetValues("Set-Cookie", out var contentValues) == true)
+        {
+            values = contentValues;
+        }
+
+        if (values is null)
+        {
+            return;
+        }
+
+        foreach (var raw in values)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            const string prefix = ".ROBLOSECURITY=";
+            var idx = raw.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                continue;
+            }
+
+            var start = idx + prefix.Length;
+            var end = raw.IndexOf(';', start);
+            var value = end > start ? raw[start..end] : raw[start..];
+            value = Sanitize(Uri.UnescapeDataString(value.Trim()));
+            if (!string.IsNullOrEmpty(value))
+            {
+                setCookie(value);
+            }
+        }
+    }
+
+    private static bool HasChallengeHeader(HttpResponseMessage response)
+    {
+        foreach (var header in response.Headers)
+        {
+            if (header.Key.Contains("challenge", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeChallengeBody(string? body) =>
+        !string.IsNullOrEmpty(body)
+        && (body.Contains("Challenge is required", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("\"challengeType\"", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("rblx-challenge", StringComparison.OrdinalIgnoreCase));
 
     private static bool TryGetTicketFromJson(string? body, out string? ticket)
     {
@@ -444,4 +699,4 @@ public static class RobloxSessionCookie
     }
 }
 
-public readonly record struct LaunchResult(bool Ok, string Message);
+public readonly record struct LaunchResult(bool Ok, string Message, string? UpdatedCookie = null, long? BrowserTrackerId = null);
