@@ -373,7 +373,7 @@
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Clicks per second" Foreground="{StaticResource TextMuted}" FontSize="12" />
                 <TextBlock Grid.Row="1" x:Name="CpsBigValue" Text="8" FontSize="32" FontWeight="SemiBold" Foreground="{StaticResource Accent}" Margin="0,4,0,8" />
-                <Slider Grid.Row="2" x:Name="CpsSlider" Style="{StaticResource FlatSlider}" Minimum="1" Maximum="40" Value="8" IsSnapToTickEnabled="True" TickFrequency="1" />
+                <Slider Grid.Row="2" x:Name="CpsSlider" Style="{StaticResource FlatSlider}" Minimum="1" Maximum="100" Value="8" IsSnapToTickEnabled="True" TickFrequency="1" />
               </Grid>
             </Border>
             <Border Margin="0,0,0,10" Background="{StaticResource InputBg}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16,14">

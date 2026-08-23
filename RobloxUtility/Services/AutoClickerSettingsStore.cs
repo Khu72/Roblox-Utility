@@ -31,7 +31,7 @@ public sealed class AutoClickerSettingsStore
                 return null;
             }
 
-            cfg.ClicksPerSecond = Math.Clamp(cfg.ClicksPerSecond, 1, 40);
+            cfg.ClicksPerSecond = Math.Clamp(cfg.ClicksPerSecond, 1, 100);
             cfg.InitialDelayMs = Math.Clamp(cfg.InitialDelayMs, 0, 1000);
             cfg.ExtraDelayPerClickMs = Math.Clamp(cfg.ExtraDelayPerClickMs, 0, 500);
             return cfg;
